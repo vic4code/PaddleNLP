@@ -10,7 +10,6 @@ from paddle.io import DataLoader, BatchSampler
 from paddlenlp.data import DataCollatorWithPadding
 from paddlenlp.datasets import load_dataset
 from paddlenlp.transformers import AutoModel, AutoTokenizer
-
 from utils import preprocess_function, read_local_dataset
 
 # yapf: disable
@@ -27,6 +26,27 @@ parser.add_argument("--data_file", type=str, default="data.txt", help="Unlabeled
 parser.add_argument("--label_file", type=str, default="label.txt", help="Label file name")
 args = parser.parse_args()
 # yapf: enable
+
+
+def cosine_sim(query_embedding, target_embedding):
+
+    cosine_sim = paddle.matmul(query_embedding, target_embedding)
+
+    return cosine_sim
+
+
+def split_tokens(sequence, n_gram=2):
+
+    assert isinstance(sequence, paddle.Tensor) and len(sequence.shape) == 3
+
+    ids_splits = []
+
+    for i in range(1, n_gram + 1):
+        for n in range(sequence.shape[1] - i):
+             sub_sequence = sequence[:, n : n + i, :]
+             ids_splits.append([i, sub_sequence])
+
+    return ids_splits
 
 
 @paddle.no_grad()
@@ -55,8 +75,9 @@ def predict():
         label_nums=len(label_list),
         is_test=True,
     )
-
+    
     data_ds = data_ds.map(trans_func)
+    # print(dir(data_ds), data_ds.new_data, data_ds.info)
 
     # batchify dataset
     collate_fn = DataCollatorWithPadding(tokenizer)
@@ -68,8 +89,17 @@ def predict():
     model.eval()
     for batch in data_data_loader:
         logits = model(**batch)
-        print(logits)
+        
+        for logit in logits:
+            text_embeddings = paddle.sum(logit, axis=-1)
+        
+        text_embedding = paddle.mean(logit, axis=0)
 
+        # token_embedding = 
+        # cos_similarity = F.cosine_similarity
+        # for 
+            # print(text_embeddings.shape)
+            
         return
         # probs = F.sigmoid(logits).numpy()
 
@@ -93,4 +123,8 @@ def predict():
 
 if __name__ == "__main__":
 
-    predict()
+    # predict()
+
+    x = paddle.randn(shape = [2,3,3])
+    splits = split_tokens(x)
+    print(splits)
