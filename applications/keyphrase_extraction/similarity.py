@@ -4,6 +4,7 @@ import functools
 import numpy as np
 
 import paddle
+import paddle.nn as nn
 import paddle.nn.functional as F
 from paddlenlp.utils.log import logger
 from paddle.io import DataLoader, BatchSampler
@@ -14,8 +15,8 @@ from utils import preprocess_function, read_local_dataset
 
 # yapf: disable
 parser = argparse.ArgumentParser()
-parser.add_argument('--device', default="gpu", help="Select which device to train model, defaults to gpu.")
-parser.add_argument("--dataset_dir", required=True, default=None, type=str, help="Local dataset directory should include data.txt and label.txt")
+parser.add_argument('--device', default="cpu", help="Select which device to train model, defaults to gpu.")
+parser.add_argument("--dataset_dir", required=True, default="data", type=str, help="Local dataset directory should include data.txt and label.txt")
 parser.add_argument("--output_file", default="output.txt", type=str, help="Save prediction result")
 parser.add_argument('--model_name', default="ernie-3.0-medium-zh", help="Select model to train, defaults to ernie-3.0-medium-zh.",
                     choices=["ernie-1.0-large-zh-cw","ernie-3.0-xbase-zh", "ernie-3.0-base-zh", "ernie-3.0-medium-zh", "ernie-3.0-micro-zh", "ernie-3.0-mini-zh", "ernie-3.0-nano-zh", "ernie-2.0-base-en", "ernie-2.0-large-en","ernie-m-base","ernie-m-large"])
@@ -28,25 +29,49 @@ args = parser.parse_args()
 # yapf: enable
 
 
-def cosine_sim(query_embedding, target_embedding):
+class cosine_sim(nn.Layer):  
+    def __init__(self, dropout=None):
 
-    cosine_sim = paddle.matmul(query_embedding, target_embedding)
+        super().__init__()
+  
+    def get_pooled_embedding(self, embedding):
 
-    return cosine_sim
+        embedding = F.normalize(embedding, p=2, axis=-1)
+
+        return embedding
+
+    def forward(self, query_embedding, target_embedding):
+
+        # Get the mean of a subsequence
+        query_embedding = paddle.mean(query_embedding, axis=1)
+        query_embedding = self.get_pooled_embedding(query_embedding)
+
+        target_embedding = self.get_pooled_embedding(target_embedding)
+ 
+        cosine_sim = paddle.sum(query_embedding * target_embedding, axis=-1)
+        return cosine_sim
 
 
-def split_tokens(sequence, n_gram=2):
+def split_embeddings(embedding, n_gram=4):
 
-    assert isinstance(sequence, paddle.Tensor) and len(sequence.shape) == 3
+    assert n_gram <= embedding.shape[1]
+    assert isinstance(embedding, paddle.Tensor) and len(embedding.shape) == 3
 
-    ids_splits = []
+    embedding_splits = []
 
     for i in range(1, n_gram + 1):
-        for n in range(sequence.shape[1] - i):
-             sub_sequence = sequence[:, n : n + i, :]
-             ids_splits.append([i, sub_sequence])
+        for n in range(1, embedding.shape[1] - i + 1):
+             sub_embedding = embedding[:, n : n + i, :]
+             embedding_splits.append(
+                                        {
+                                        'n_gram': i, 
+                                        'sub_embedding': sub_embedding,
+                                        'start': n,
+                                        'end': n + i
+                                        }
+                                    )
 
-    return ids_splits
+    return embedding_splits
 
 
 @paddle.no_grad()
@@ -82,49 +107,36 @@ def predict():
     # batchify dataset
     collate_fn = DataCollatorWithPadding(tokenizer)
     data_batch_sampler = BatchSampler(data_ds, batch_size=args.batch_size, shuffle=False)
-
     data_data_loader = DataLoader(dataset=data_ds, batch_sampler=data_batch_sampler, collate_fn=collate_fn)
 
     results = []
     model.eval()
+
+    similarity = cosine_sim()
+
     for batch in data_data_loader:
-        logits = model(**batch)
-        
-        for logit in logits:
-            text_embeddings = paddle.sum(logit, axis=-1)
-        
-        text_embedding = paddle.mean(logit, axis=0)
 
-        # token_embedding = 
-        # cos_similarity = F.cosine_similarity
-        # for 
-            # print(text_embeddings.shape)
-            
-        return
-        # probs = F.sigmoid(logits).numpy()
+        sequence_outputs, pooled_outputs = model(**batch) 
+        target_embedding = sequence_outputs[:, 0, :]
+  
+        sequence_outputs = sequence_outputs[0].unsqueeze(0)
+        embeddings = split_embeddings(sequence_outputs, n_gram=20)
 
-    #     print()
-    #     for prob in probs:
-    #         labels = []
-    #         for i, p in enumerate(prob):
-    #             if p > 0.5:
-    #                 labels.append(i)
-    #         results.append(labels)
+        for split in embeddings:
+            sim = similarity(split['sub_embedding'], target_embedding)
 
-    # with open(args.output_file, "w", encoding="utf-8") as f:
-    #     f.write("text" + "\t" + "label" + "\n")
-    #     for d, result in zip(data_ds.data, results):
-    #         label = [label_list[r] for r in result]
-    #         f.write(d["sentence"] + "\t" + ", ".join(label) + "\n")
-    # logger.info("Prediction results save in {}.".format(args.output_file))
+            if sim[0] > 0.55:
+                print(tokenizer.convert_ids_to_tokens(batch['input_ids'][0, split['start']:split['end']]))
 
+            # results.append(sim)
+
+    # print(results)
     return
-
 
 if __name__ == "__main__":
 
-    # predict()
+    predict()
 
-    x = paddle.randn(shape = [2,3,3])
-    splits = split_tokens(x)
-    print(splits)
+    # x = paddle.randn(shape = [2, 10, 3])
+    # splits = split_embeddings(x)
+    # print(splits)
