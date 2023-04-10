@@ -16,7 +16,7 @@ from utils import preprocess_function, read_local_dataset
 # yapf: disable
 parser = argparse.ArgumentParser()
 parser.add_argument('--device', default="cpu", help="Select which device to train model, defaults to gpu.")
-parser.add_argument("--dataset_dir", required=True, default="data", type=str, help="Local dataset directory should include data.txt and label.txt")
+parser.add_argument("--dataset_dir", default="data", type=str, help="Local dataset directory should include data.txt and label.txt")
 parser.add_argument("--output_file", default="output.txt", type=str, help="Save prediction result")
 parser.add_argument('--model_name', default="ernie-3.0-medium-zh", help="Select model to train, defaults to ernie-3.0-medium-zh.",
                     choices=["ernie-1.0-large-zh-cw", "ernie-3.0-xbase-zh", "ernie-3.0-base-zh", "ernie-3.0-medium-zh", "ernie-3.0-micro-zh", "ernie-3.0-mini-zh", "ernie-3.0-nano-zh", "ernie-2.0-base-en", "ernie-2.0-large-en", "ernie-m-base", "ernie-m-large"])
@@ -28,6 +28,8 @@ parser.add_argument("--label_file", type=str, default="label.txt", help="Label f
 args = parser.parse_args()
 # yapf: enable
 
+def standarize(x):
+    return (x - paddle.mean(x))/(paddle.std(x) + 0.0001)
 
 class cosine_sim(nn.Layer):
     def __init__(self, dropout=None):
@@ -43,16 +45,25 @@ class cosine_sim(nn.Layer):
     def forward(self, query_embedding, target_embedding):
 
         # Get the mean of a subsequence
+
+        #query_embedding += 10
+        #target_embedding += 10
+
+        #query_embedding = paddle.log10(query_embedding)
+        #target_embedding = paddle.log10(target_embedding)
+
         query_embedding = paddle.mean(query_embedding, axis=1)
+
         query_embedding = self.get_pooled_embedding(query_embedding)
 
         target_embedding = self.get_pooled_embedding(target_embedding)
+        
+        cosine_sim = np.corrcoef(query_embedding.squeeze(0), target_embedding.squeeze(0))
+        #cosine_sim = paddle.sum(query_embedding * target_embedding, axis=-1)
+        return cosine_sim[0, 1]
 
-        cosine_sim = paddle.sum(query_embedding * target_embedding, axis=-1)
-        return cosine_sim
 
-
-def split_embeddings(embedding, n_gram=4):
+def split_embeddings(embedding, batch, n_gram=4):
 
     assert n_gram <= embedding.shape[1]
     assert isinstance(embedding, paddle.Tensor) and len(embedding.shape) == 3
@@ -67,10 +78,12 @@ def split_embeddings(embedding, n_gram=4):
                     'n_gram': i,
                     'sub_embedding': sub_embedding,
                     'start': n,
-                    'end': n + i
+                    'end': n + i,
+                    'input_ids': batch['input_ids'][0, n:(n + i)],
+                    'sim': 0
                 }
             )
-
+    
     return embedding_splits
 
 
@@ -84,14 +97,19 @@ def predict():
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
 
     label_list = []
-    label_path = os.path.join(args.dataset_dir, args.label_file)
+    label_path = os.path.join("./applications/keyphrase_extraction/", args.dataset_dir, args.label_file)
+    
     with open(label_path, "r", encoding="utf-8") as f:
         for i, line in enumerate(f):
             label_list.append(line.strip())
 
     data_ds = load_dataset(
-        read_local_dataset, path=os.path.join(args.dataset_dir, args.data_file), is_test=True, lazy=False
+        read_local_dataset, path=os.path.join("./applications/keyphrase_extraction/", args.dataset_dir, args.data_file), is_test=True, lazy=False
     )
+
+    #luka
+    args.max_seq_length = len(data_ds[0]['sentence'])
+    args.batch_size = 1
 
     trans_func = functools.partial(
         preprocess_function,
@@ -117,16 +135,28 @@ def predict():
     for batch in data_data_loader:
 
         sequence_outputs, pooled_outputs = model(**batch)
-        target_embedding = sequence_outputs[:, 0, :]
+        target_embedding = sequence_outputs[:, 0, :][0].unsqueeze(0)
 
         sequence_outputs = sequence_outputs[0].unsqueeze(0)
-        embeddings = split_embeddings(sequence_outputs, n_gram=20)
+        embeddings = split_embeddings(sequence_outputs, batch, n_gram=20)
+        #tmp_sim = []
+        for split in range(len(embeddings)):
+            sim = similarity(embeddings[split]['sub_embedding'], target_embedding)
+            #tmp_sim.append(sim)
+            embeddings[split]['sim'] = sim
+            #if sim[0] > 0.9953:
+            #    output = tokenizer.convert_ids_to_tokens(batch['input_ids'][0, embeddings[split]['start']:embeddings[split]['end']])
+                #print(output)
+                #if '。' not in output:
+                #    print(output)
+        print(123)
+        sorted_embeddings = sorted(embeddings, key=lambda x:x['sim'], reverse=True)
 
-        for split in embeddings:
-            sim = similarity(split['sub_embedding'], target_embedding)
-
-            if sim[0] > 0.55:
-                print(tokenizer.convert_ids_to_tokens(batch['input_ids'][0, split['start']:split['end']]))
+        for i in range(20):
+            print(tokenizer.convert_ids_to_tokens(sorted_embeddings[i]['input_ids']))
+        print("end")
+        
+        print(sorted_embeddings)
 
             # results.append(sim)
 
