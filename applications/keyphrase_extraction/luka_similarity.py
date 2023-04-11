@@ -12,6 +12,7 @@ from paddlenlp.data import DataCollatorWithPadding
 from paddlenlp.datasets import load_dataset
 from paddlenlp.transformers import AutoModel, AutoTokenizer
 from utils import preprocess_function, read_local_dataset
+import matplotlib.pyplot as plt
 
 # yapf: disable
 parser = argparse.ArgumentParser()
@@ -28,8 +29,10 @@ parser.add_argument("--label_file", type=str, default="label.txt", help="Label f
 args = parser.parse_args()
 # yapf: enable
 
+
 def standarize(x):
-    return (x - paddle.mean(x))/(paddle.std(x) + 0.0001)
+    return (x - paddle.mean(x)) / (paddle.std(x) + 0.0001)
+
 
 class cosine_sim(nn.Layer):
     def __init__(self, dropout=None):
@@ -46,32 +49,33 @@ class cosine_sim(nn.Layer):
 
         # Get the mean of a subsequence
 
-        #query_embedding += 10
-        #target_embedding += 10
+        # query_embedding += 10
+        # target_embedding += 10
 
-        #query_embedding = paddle.log10(query_embedding)
-        #target_embedding = paddle.log10(target_embedding)
+        # query_embedding = paddle.log10(query_embedding)
+        # target_embedding = paddle.log10(target_embedding)
 
         query_embedding = paddle.mean(query_embedding, axis=1)
 
         query_embedding = self.get_pooled_embedding(query_embedding)
 
         target_embedding = self.get_pooled_embedding(target_embedding)
-        
-        cosine_sim = np.corrcoef(query_embedding.squeeze(0), target_embedding.squeeze(0))
-        #cosine_sim = paddle.sum(query_embedding * target_embedding, axis=-1)
-        return cosine_sim[0, 1]
+
+        cosine_sim = paddle.sum(query_embedding * target_embedding, axis=-1)
+        return cosine_sim
 
 
 def split_embeddings(embedding, batch, n_gram=4):
 
     assert n_gram <= embedding.shape[1]
     assert isinstance(embedding, paddle.Tensor) and len(embedding.shape) == 3
-
+    windows_size = 3
     embedding_splits = []
 
     for i in range(1, n_gram + 1):
         for n in range(1, embedding.shape[1] - i + 1):
+            a =  n - windows_size  if n - windows_size >= 1 else 1
+            b = n + i + windows_size if n + i + windows_size <= embedding.shape[1] - i + 1 else embedding.shape[1] - i + 1
             sub_embedding = embedding[:, n : n + i, :]
             embedding_splits.append(
                 {
@@ -80,11 +84,36 @@ def split_embeddings(embedding, batch, n_gram=4):
                     'start': n,
                     'end': n + i,
                     'input_ids': batch['input_ids'][0, n:(n + i)],
+                    'input_ids_interval': batch['input_ids'][0, a:b],
                     'sim': 0
                 }
             )
-    
+
     return embedding_splits
+
+
+def plot_result(embedding):
+    fig, axs = plt.subplots(nrows=4, ncols=5, figsize=(5.5, 3.5),
+                            layout="constrained")
+
+    n_gram = 1
+    for row in range(4):
+        for col in range(5):
+            axs[row, col].annotate(f'n_gram: {n_gram}', (0.7, 0.5),
+                                transform=axs[row, col].transAxes,
+                                ha='center', va='center', fontsize=16,
+                                color='darkgrey')
+            y = [i['sim'] for i in filter(lambda x: x['n_gram'] == n_gram, embedding)]
+            # x = list(reversed(range(len(y))))
+            x = list(range(len(y)))
+            axs[row, col].plot(x, y)
+            n_gram += 1
+    plt.show()
+
+        # add an artist, in this case a nice label in the middle...
+
+        
+    
 
 
 @paddle.no_grad()
@@ -97,17 +126,17 @@ def predict():
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
 
     label_list = []
-    label_path = os.path.join("./applications/keyphrase_extraction/", args.dataset_dir, args.label_file)
-    
+    label_path = os.path.join("./PaddleNLP/applications/keyphrase_extraction/", args.dataset_dir, args.label_file)
+
     with open(label_path, "r", encoding="utf-8") as f:
         for i, line in enumerate(f):
             label_list.append(line.strip())
 
     data_ds = load_dataset(
-        read_local_dataset, path=os.path.join("./applications/keyphrase_extraction/", args.dataset_dir, args.data_file), is_test=True, lazy=False
+        read_local_dataset, path=os.path.join("./PaddleNLP/applications/keyphrase_extraction/", args.dataset_dir, args.data_file), is_test=True, lazy=False
     )
 
-    #luka
+    # luka
     args.max_seq_length = len(data_ds[0]['sentence'])
     args.batch_size = 1
 
@@ -139,26 +168,29 @@ def predict():
 
         sequence_outputs = sequence_outputs[0].unsqueeze(0)
         embeddings = split_embeddings(sequence_outputs, batch, n_gram=20)
-        #tmp_sim = []
+        # tmp_sim = []
         for split in range(len(embeddings)):
             sim = similarity(embeddings[split]['sub_embedding'], target_embedding)
-            #tmp_sim.append(sim)
-            embeddings[split]['sim'] = sim
-            #if sim[0] > 0.9953:
+            # tmp_sim.append(sim)
+            embeddings[split]['sim'] = sim[0]
+            # if sim[0] > 0.9953:
             #    output = tokenizer.convert_ids_to_tokens(batch['input_ids'][0, embeddings[split]['start']:embeddings[split]['end']])
-                #print(output)
-                #if '。' not in output:
-                #    print(output)
+            # print(output)
+            # if '。' not in output:
+            #    print(output)
         print(123)
-        sorted_embeddings = sorted(embeddings, key=lambda x:x['sim'], reverse=True)
-
-        for i in range(20):
-            print(tokenizer.convert_ids_to_tokens(sorted_embeddings[i]['input_ids']))
+        #plot_result(embeddings)
+        sorted_embeddings = sorted(embeddings, key=lambda x: x['sim'], reverse=True)
+        
+        a = filter(lambda x: x['n_gram'] == 1, sorted_embeddings)
+        for i in range(100):
+            tmp = next(a)
+            print(tokenizer.convert_ids_to_tokens(tmp['input_ids_interval']))
         print("end")
         
         print(sorted_embeddings)
 
-            # results.append(sim)
+        # results.append(sim)
 
     # print(results)
     return
