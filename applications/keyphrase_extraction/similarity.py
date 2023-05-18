@@ -12,6 +12,7 @@ from paddlenlp.data import DataCollatorWithPadding
 from paddlenlp.datasets import load_dataset
 from paddlenlp.transformers import AutoModel, AutoTokenizer
 from utils import preprocess_function, read_local_dataset
+from collections import Counter
 
 # yapf: disable
 parser = argparse.ArgumentParser()
@@ -117,15 +118,18 @@ def predict():
     for batch in data_data_loader:
 
         sequence_outputs, pooled_outputs = model(**batch) 
-        target_embedding = sequence_outputs[:, 0, :]
-  
+
         sequence_outputs = sequence_outputs[0].unsqueeze(0)
-        embeddings = split_embeddings(sequence_outputs, n_gram=20)
+        target_embedding = sequence_outputs[:, 0, :].unsqueeze(1)
+        # target_embedding = paddle.mean(sequence_outputs, axis=1)
+  
+        # sequence_outputs = sequence_outputs[0].unsqueeze(0)
+        embeddings = split_embeddings(sequence_outputs, n_gram=10)
 
         for split in embeddings:
             sim = similarity(split['sub_embedding'], target_embedding)
 
-            if sim[0] > 0.55:
+            if sim[0] > 0.5:
                 print(tokenizer.convert_ids_to_tokens(batch['input_ids'][0, split['start']:split['end']]))
 
             # results.append(sim)
