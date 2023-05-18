@@ -20,11 +20,13 @@ import paddle
 import paddle.nn as nn
 import paddle.nn.functional as F
 from paddle.nn import BCEWithLogitsLoss, CrossEntropyLoss, Layer, MSELoss
+from ...layers import Linear as TransposedLinear
+from paddle import Tensor
 
 from ...utils.env import CONFIG_NAME
 from .. import PretrainedModel, register_base_model
 from ..activations import ACT2FN, get_activation
-from ..model_outputs import ModelOutput, tuple_output
+from ..model_outputs import ModelOutput, tuple_output, MaskedLMOutput
 from .configuration import (
     XLNET_PRETRAINED_INIT_CONFIGURATION,
     XLNET_PRETRAINED_RESOURCE_FILES_MAP,
@@ -40,6 +42,7 @@ __all__ = [
     "XLNetForMultipleChoice",
     "XLNetForQuestionAnswering",
     "XLNetForCausalLM",
+    "XLNetForMaskedLM",
 ]
 
 dtype_float = paddle.get_default_dtype()
@@ -996,6 +999,7 @@ class XLNetModel(XLNetPretrainedModel):
         else:
             use_mems = use_mems_eval
 
+        print(input_ids.shape)
         # The original code for XLNet uses shapes [len, bsz] with the batch dimension at the end
         # but we want a unified interface in the library with the batch size on the first dimension
         # so we move here the first dimension (batch) to the end
@@ -1945,3 +1949,174 @@ class XLNetForQuestionAnswering(XLNetPretrainedModel):
 
 
 XLNetForCausalLM = XLNetLMHeadModel
+
+class XLNetLMPredictionHead(nn.Layer):
+    r"""
+    Ernie Model with a `language modeling` head on top.
+    """
+
+    def __init__(
+        self,
+        config: XLNetConfig,
+        weight_attr=None,
+    ):
+        super(XLNetLMPredictionHead, self).__init__()
+
+        self.transform = nn.Linear(config.hidden_size, config.hidden_size, weight_attr=weight_attr)
+        self.activation = getattr(nn.functional, config.ff_activation)
+        self.layer_norm = nn.LayerNorm(config.hidden_size)
+        self.decoder = TransposedLinear(config.hidden_size, config.vocab_size)
+        # link bias to load pretrained weights
+        self.decoder_bias = self.decoder.bias
+
+    def forward(self, hidden_states, masked_positions=None):
+        if masked_positions is not None:
+            hidden_states = paddle.reshape(hidden_states, [-1, hidden_states.shape[-1]])
+            hidden_states = paddle.tensor.gather(hidden_states, masked_positions)
+        # gather masked tokens might be more quick
+        hidden_states = self.transform(hidden_states)
+        hidden_states = self.activation(hidden_states)
+        hidden_states = self.layer_norm(hidden_states)
+        hidden_states = self.decoder(hidden_states)
+        # hidden_states = paddle.tensor.matmul(hidden_states, self.decoder.weight, transpose_y=True) + self.decoder_bias
+        return hidden_states
+
+class XLNetOnlyMLMHead(nn.Layer):
+    def __init__(self, config: XLNetConfig):
+        super().__init__()
+        self.predictions = XLNetLMPredictionHead(config=config)
+
+    def forward(self, sequence_output, masked_positions=None):
+        prediction_scores = self.predictions(sequence_output, masked_positions)
+        return prediction_scores
+
+
+class XLNetForMaskedLM(XLNetPretrainedModel):
+    """
+    Ernie Model with a `masked language modeling` head on top.
+
+    Args:
+        config (:class:`ErnieConfig`):
+            An instance of ErnieConfig used to construct ErnieForMaskedLM.
+
+    """
+
+    def __init__(self, config: XLNetConfig):
+        super(XLNetForMaskedLM, self).__init__(config)
+        self.transformer = XLNetModel(config)
+        self.cls = XLNetOnlyMLMHead(config=config)
+        self.tie_weights()
+
+    def get_output_embeddings(self):
+        return self.cls.predictions.decoder
+
+    def forward(
+        self,
+        input_ids,
+        token_type_ids=None,
+        attention_mask=None,
+        mems=None,
+        perm_mask=None,
+        target_mapping=None,
+        input_mask=None,
+        head_mask=None,
+        masked_positions: Optional[Tensor] = None,
+        inputs_embeds=None,
+        labels=None,
+        use_mems_train=False,
+        use_mems_eval=False,
+        output_attentions=False,
+        output_hidden_states=False,
+        return_dict=False,
+    ):
+        r"""
+
+        Args:
+            input_ids (Tensor):
+                See :class:`ErnieModel`.
+            token_type_ids (Tensor, optional):
+                See :class:`ErnieModel`.
+            position_ids (Tensor, optional):
+                See :class:`ErnieModel`.
+            attention_mask (Tensor, optional):
+                See :class:`ErnieModel`.
+            masked_positions:
+                masked positions of output.
+            inputs_embeds(Tensor, optional):
+                See :class:`ErnieModel`.
+            labels (Tensor of shape `(batch_size, sequence_length)`, optional):
+                Labels for computing the masked language modeling loss. Indices should be in `[-100, 0, ...,
+                vocab_size]` (see `input_ids` docstring) Tokens with indices set to `-100` are ignored (masked), the
+                loss is only computed for the tokens with labels in `[0, ..., vocab_size]`
+            output_hidden_states (bool, optional):
+                Whether to return the hidden states of all layers.
+                Defaults to `False`.
+            output_attentions (bool, optional):
+                Whether to return the attentions tensors of all attention layers.
+                Defaults to `False`.
+            return_dict (bool, optional):
+                Whether to return a :class:`~paddlenlp.transformers.model_outputs.MaskedLMOutput` object. If
+                `False`, the output will be a tuple of tensors. Defaults to `False`.
+
+        Returns:
+            An instance of :class:`~paddlenlp.transformers.model_outputs.MaskedLMOutput` if `return_dict=True`.
+            Otherwise it returns a tuple of tensors corresponding to ordered and
+            not None (depending on the input arguments) fields of :class:`~paddlenlp.transformers.model_outputs.MaskedLMOutput`.
+
+        Example:
+            .. code-block::
+
+                import paddle
+                from paddlenlp.transformers import ErnieForMaskedLM, ErnieTokenizer
+
+                tokenizer = ErnieTokenizer.from_pretrained('ernie-1.0')
+                model = ErnieForMaskedLM.from_pretrained('ernie-1.0')
+
+                inputs = tokenizer("Welcome to use PaddlePaddle and PaddleNLP!")
+                inputs = {k:paddle.to_tensor([v]) for (k, v) in inputs.items()}
+
+                logits = model(**inputs)
+                print(logits.shape)
+                # [1, 17, 18000]
+
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        outputs = self.transformer(
+            input_ids,
+            token_type_ids=token_type_ids,
+            attention_mask=attention_mask,
+            mems=mems,
+            perm_mask=perm_mask,
+            target_mapping=target_mapping,
+            input_mask=input_mask,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            use_mems_train=use_mems_train,
+            use_mems_eval=use_mems_eval,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        sequence_output = outputs[0]
+        prediction_scores = self.cls(sequence_output, masked_positions=masked_positions)
+
+        masked_lm_loss = None
+        if labels is not None:
+            loss_fct = paddle.nn.CrossEntropyLoss()  # -100 index = padding token
+            masked_lm_loss = loss_fct(
+                prediction_scores.reshape((-1, paddle.shape(prediction_scores)[-1])), labels.reshape((-1,))
+            )
+        if not return_dict:
+            output = (prediction_scores,) + outputs[2:]
+            return (
+                ((masked_lm_loss,) + output)
+                if masked_lm_loss is not None
+                else (output[0] if len(output) == 1 else output)
+            )
+
+        return MaskedLMOutput(
+            loss=masked_lm_loss,
+            logits=prediction_scores,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
