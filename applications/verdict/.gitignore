@@ -1,0 +1,15 @@
+# tmp and cached
+**/__pycache__/
+
+# data
+label_json_24.csv
+**/data/202301/
+**/data/dataset/
+**/data/formal_dataset/
+**/data/jsonl/
+**/data/luka/
+**/data/textline/
+
+# checkpoints
+**/checkpoint/
+**/checkpoints/
