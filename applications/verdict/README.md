@@ -19,6 +19,13 @@ conda install paddlepaddle-gpu==2.4.2 cudatoolkit=11.7 -c https://mirrors.tuna.t
 pip install git+https://github.com/PaddlePaddle/PaddleNLP.git
 ```
 
+### Install by git source code
+```
+git clone https://github.com/PaddlePaddle/PaddleNLP.git
+export PYTHONPATH=/path/to/your/module/directory
+pip install paddlepaddle
+pip install -r requirements.txt     
+```
 
 ## Text classfication
 ### Data preprocess
@@ -79,7 +86,7 @@ python train.py \
 ```
 python train.py \
 --device "cpu" \
---data_dir ./data/dataset \
+--data_dir ./data/toy_dataset \
 --output_dir ./checkpoints/ \
 --prompt "這句話要包含的要素有" \
 --model_name_or_path ernie-3.0-base-zh \

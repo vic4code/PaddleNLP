@@ -17,7 +17,9 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 import paddle
+import paddle.nn as nn
 import paddle.nn.functional as F
+
 from metric import MetricReport
 from utils import load_local_dataset
 
@@ -32,6 +34,9 @@ from paddlenlp.trainer import EarlyStoppingCallback, PdArgumentParser
 from paddlenlp.transformers import AutoModelForMaskedLM, AutoTokenizer
 from paddlenlp.utils.log import logger
 
+from paddlenlp.trainer.trainer import Trainer
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
 
 # yapf: disable
 @dataclass
@@ -45,6 +50,80 @@ class ModelArguments:
     model_name_or_path: str = field(default="ernie-3.0-base-zh", metadata={"help": "The build-in pretrained model or the path to local model."})
     export_type: str = field(default='paddle', metadata={"help": "The type to export. Support `paddle` and `onnx`."})
 # yapf: enable
+
+
+class PromptTrainer(PromptTrainer):
+    def compute_loss(self, model, inputs, return_outputs=False, chunk_size=128):
+        """
+        Compute the total loss for every batch.
+        """
+        if "labels" not in inputs:
+            raise ValueError("Fail to compute loss as `labels` not in {}.".format(inputs))
+        labels = inputs["labels"]
+
+        input_dict = inputs.copy()
+
+        sequence_len = input_dict['input_ids'].shape[-1]
+        # input_ids[:, ]
+        # inpu
+        # print(input_dict, input_dict.keys())
+        # return
+
+        if self.criterion is not None:
+            # pop labels to move loss computation out of the model
+            input_dict.pop("labels")
+            input_dict["return_hidden_states"] = True
+            logits, hidden_states = model(**input_dict)
+            loss = self.criterion(logits, labels)
+
+            if self.args.use_rdrop:
+                loss = self._compute_rdrop_loss(model, input_dict, labels, logits, loss)
+
+            if self.args.use_rgl:
+                loss += self._compute_rgl_loss(hidden_states, labels)
+        else:
+            loss, logits = model(**input_dict)
+
+        outputs = (loss, logits)
+
+        return (loss, outputs) if return_outputs else loss
+
+    def training_step(self, model: nn.Layer, inputs: Dict[str, Union[paddle.Tensor, Any]]) -> paddle.Tensor:
+        """
+        Perform a training step on a batch of inputs.
+
+        Subclass and override to inject custom behavior.
+
+        Args:
+            model (`nn.Layer`):
+                The model to train.
+            inputs (`Dict[str, Union[paddle.Tensor, Any]]`):
+                The inputs and targets of the model.
+
+                The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
+                argument `labels`. Check your model's documentation for all accepted arguments.
+
+        Return:
+            `paddle.Tensor`: The tensor with training loss on this batch.
+        """
+        if self.args.pipeline_parallel_degree > 1:
+            return self.training_pipeline_step(model, inputs)
+
+        model.train()
+        inputs = self._prepare_inputs(inputs)
+
+        with self.autocast_smart_context_manager():
+            loss = self.compute_loss(model, inputs)
+
+        if self.args.gradient_accumulation_steps > 1:
+            loss = loss / self.args.gradient_accumulation_steps
+
+        if self.do_grad_scaling:
+            self.scaler.scale(loss).backward()
+        else:
+            loss.backward()
+
+        return loss.detach()
 
 
 def main():
