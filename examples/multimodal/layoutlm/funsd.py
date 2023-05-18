@@ -1,3 +1,17 @@
+# Copyright (c) 2023 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 import os
 
@@ -5,7 +19,6 @@ import paddle
 from paddle.io import Dataset
 
 logger = logging.getLogger(__name__)
-import numpy as np
 
 
 class FunsdDataset(Dataset):
@@ -156,7 +169,7 @@ def read_examples_from_file(data_dir, mode):
         if words:
             examples.append(
                 InputExample(
-                    guid="%s-%d".format(mode, guid_index),
+                    guid=f"{mode}-{guid_index}",
                     words=words,
                     labels=labels,
                     boxes=boxes,
@@ -235,7 +248,7 @@ def convert_examples_to_features(
         # it easier for the model to learn the concept of sequences.
         #
         # For classification tasks, the first vector (corresponding to [CLS]) is
-        # used as as the "sentence vector". Note that this only makes sense because
+        # used as the "sentence vector". Note that this only makes sense because
         # the entire model is fine-tuned.
         tokens += [sep_token]
         token_boxes += [sep_token_box]

@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import numpy as np
 import paddle
 import paddle.nn as nn
-from paddlenlp.utils.log import logger
-from paddlenlp.layers import sequence_mask
+
+from ..utils.log import logger
+from .sequence import sequence_mask
 
 __all__ = ["LinearChainCrf", "LinearChainCrfLoss", "ViterbiDecoder"]
 
@@ -291,7 +291,7 @@ class ViterbiDecoder(nn.Layer):
             The transition matrix.  Its dtype is float32 and has a shape of `[num_tags, num_tags]`.
         with_start_stop_tag (bool, optional):
             If set to True, the last row and the last column of transitions will be considered as start tag,
-            the the penultimate row and the penultimate column of transitions will be considered as stop tag.
+            the penultimate row and the penultimate column of transitions will be considered as stop tag.
             Else, all the rows and columns will be considered as the real tag. Defaults to ``None``.
     """
 
@@ -338,7 +338,6 @@ class ViterbiDecoder(nn.Layer):
         """
         input_shape = paddle.shape(inputs)
         batch_size = input_shape[0]
-        seq_len = input_shape[1]
         n_label = input_shape[2]
 
         inputs_t = inputs.transpose([1, 0, 2])

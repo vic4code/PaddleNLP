@@ -109,6 +109,10 @@ class TrainingArguments:
 
             </Tip>
 
+        eval_accumulation_steps (`int`, *optional*):
+            Number of predictions steps to accumulate the output tensors for, before moving the results to the CPU. If
+            left unset, the whole predictions are accumulated on GPU/TPU before being moved to the CPU (faster but
+            requires more memory).
         learning_rate (`float`, *optional*, defaults to 5e-5):
             The initial learning rate for [`AdamW`] optimizer.
         weight_decay (`float`, *optional*, defaults to 0):
@@ -187,9 +191,9 @@ class TrainingArguments:
                 stage2 : optimizer state + gradient segmentation
                 stage3 : parameter + gradient + optimizer state segmentation
                 offload : offload parameters to cpu
-        sharding_degree (`int`, *optional*, defaults to `-1`)
+        sharding_parallel_degree (`int`, *optional*, defaults to `-1`)
             Sharding parameter in certain cards group. For example, aussume we use 2 machines each with 8 cards,
-            then set sharding_degree=8, sharding will only communication inside machine.
+            then set sharding_parallel_degree=8, sharding will only communication inside machine.
             default -1 means sharding parameters between all workers.
         recompute (`bool`, *optional*, defaults to `False`):
             Recompute the forward pass to calculate gradients. Used for saving memory.
@@ -302,6 +306,10 @@ class TrainingArguments:
         default=1,
         metadata={"help": "Number of updates steps to accumulate before performing a backward/update pass."},
     )
+    eval_accumulation_steps: Optional[int] = field(
+        default=None,
+        metadata={"help": "Number of predictions steps to accumulate before moving the tensors to the CPU."},
+    )
 
     learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate for AdamW."})
     weight_decay: float = field(default=0.0, metadata={"help": "Weight decay for AdamW if we apply some."})
@@ -408,13 +416,41 @@ class TrainingArguments:
             )
         },
     )
-    sharding_degree: int = field(
+    sharding_degree: int = field(  # Alias for sharding_parallel_degree
+        default=-1,
+        metadata={
+            "help": (
+                "@deprecated Please use sharding_parallel_degree. "
+                "Sharding parameter in certain cards group. For example, aussume we use 2 machines each with 8 cards, "
+                "then set sharding_degree=8, sharding will only communication inside machine. "
+                "default -1 means sharding parameters between all workers."
+            )
+        },
+    )
+    sharding_parallel_degree: int = field(
         default=-1,
         metadata={
             "help": (
                 "Sharding parameter in certain cards group. For example, aussume we use 2 machines each with 8 cards, "
                 "then set sharding_degree=8, sharding will only communication inside machine. "
                 "default -1 means sharding parameters between all workers."
+            )
+        },
+    )
+    tensor_parallel_degree: int = field(default=-1, metadata={"help": ("-1 for not use tensor parallel")})
+    pipeline_parallel_degree: int = field(default=-1, metadata={"help": ("-1 for not use pipeline parallel")})
+    pipeline_parallel_micro_batch_size: int = field(
+        default=1, metadata={"help": ("mirco_batch_size in pipeline parallel mode")}
+    )
+    pipeline_parallel_config: str = field(
+        default="",
+        metadata={
+            "help": (
+                "Some additional config it highly affect the useage of pipeline parallel, we provide some option to config it."
+                "following config is support:\n"
+                "disable_p2p_cache_shape, if you max sequence length is varying, please set disable_p2p_cache_shape. \n"
+                "disable_partial_send_recv, optmize send speed for tensor parallel.\n"
+                "enable_delay_scale_loss, accumulate gradients util optimizer step, all gradients div by inner pipeline accumute step. instead of div accumute step on loss directly.\n"
             )
         },
     )
@@ -425,6 +461,7 @@ class TrainingArguments:
             "Only support for networks with transformer blocks."
         },
     )
+
     scale_loss: float = field(default=2**15, metadata={"help": "The value of initial scale_loss for fp16."})
 
     minimum_eval_times: int = field(
@@ -584,6 +621,8 @@ class TrainingArguments:
 
         self.optim = OptimizerNames(self.optim)
 
+        self.use_hybrid_parallel = False
+
         if isinstance(self.sharding, bool):
             self.sharding = "stage1" if self.sharding else ""
         if isinstance(self.sharding, str):
@@ -596,19 +635,119 @@ class TrainingArguments:
         elif len(self.sharding) > (ShardingOption.OFFLOAD in self.sharding) + 1:
             raise ValueError("`--sharding` recived too many arguments.")
 
-        if len(self.sharding) == 0 and self.sharding_degree > 0:
-            warnings.warn("`--sharding_degree` is useful only when `--sharding` is specified.")
-        if len(self.sharding) > 0:
-            if self.sharding_degree == -1:
-                # self.sharding_degree = self.world_size
-                self.sharding_degree = paddle.distributed.get_world_size()
+        if self.sharding_degree > 0:
+            warnings.warn("`sharding_degree` is deprecated, please use `sharding_parallel_degree`")
+            self.sharding_parallel_degree = max(self.sharding_degree, self.sharding_parallel_degree)
 
-            assert self.world_size % self.sharding_degree == 0, (
-                "The world size for workers should be divided by sharding_degree, "
-                "sharding_degree:{sharding_degree}, world_size:{self.world_size}"
+        delattr(self, "sharding_degree")
+
+        if len(self.sharding) == 0 and self.sharding_parallel_degree > 0:
+            warnings.warn("`--sharding_parallel_degree` is useful only when `--sharding` is specified.")
+
+        if len(self.sharding) > 0 or self.tensor_parallel_degree > 1 or self.pipeline_parallel_degree > 1:
+            self.use_hybrid_parallel = True
+
+        if self.use_hybrid_parallel:
+            world_size = paddle.distributed.get_world_size()
+            tensor_parallel_degree = max(self.tensor_parallel_degree, 1)
+            pipeline_parallel_degree = max(self.pipeline_parallel_degree, 1)
+
+            assert (
+                world_size % (tensor_parallel_degree * pipeline_parallel_degree) == 0
+            ), f"Total world_size:{world_size} shoule be devided by tensor_parallel_degree: {self.tensor_parallel_degree} and pipeline_parallel_degree: {self.pipeline_parallel_degree}."
+
+            if self.sharding_parallel_degree == -1:
+                if len(self.sharding) > 0:
+                    self.sharding_parallel_degree = world_size // (tensor_parallel_degree * pipeline_parallel_degree)
+
+            sharding_parallel_degree = max(self.sharding_parallel_degree, 1)
+            if sharding_parallel_degree == 1 and len(self.sharding) > 0:
+                logger.warning("sharding_parallel_degree=1 means no sharding, please set sharding to empty!")
+                self.sharding = []
+
+            assert world_size % (sharding_parallel_degree * tensor_parallel_degree * pipeline_parallel_degree) == 0, (
+                "The world size for workers should be divided by sharding_parallel_degree, tensor_parallel_degree, and pipeline_parallel_degree, "
+                "sharding_parallel_degree:{sharding_parallel_degree}, tensor_parallel_degree:{tensor_parallel_degree}, "
+                "pipeline_parallel_degree:{pipeline_parallel_degree}, "
+                " world_size:{world_size}"
             )
+            self.data_parallel_degree = world_size // (
+                sharding_parallel_degree * tensor_parallel_degree * pipeline_parallel_degree
+            )
+
             if ShardingOption.OFFLOAD in self.sharding or ShardingOption.FULL_SHARD in self.sharding:
                 warnings.warn("`offload` and `stage3` is not supported NOW!")
+
+            if pipeline_parallel_degree > 1:
+                if ShardingOption.FULL_SHARD in self.sharding or ShardingOption.SHARD_GRAD_OP in self.sharding:
+                    raise ValueError(
+                        "pipeline parallel is not compatible for sharding stage2 or stage3, please using sharding stage1"
+                    )
+
+            # TODO use paddle.distributed.is_initialized() after paddle 2.4rc
+            if not paddle.distributed.parallel.parallel_helper._is_parallel_ctx_initialized():
+                strategy = fleet.DistributedStrategy()
+                if pipeline_parallel_degree > 1:
+                    pipeline_parallel_config = set(self.pipeline_parallel_config.split(" "))
+                    for x in pipeline_parallel_config:
+                        if len(x) > 0:
+                            if x not in [
+                                "disable_p2p_cache_shape",
+                                "disable_partial_send_recv",
+                                "enable_delay_scale_loss",
+                            ]:
+                                raise ValueError(
+                                    f"Found unknown pipeline model config {x}, accpet config is disable_p2p_cache_shape, disable_partial_send_recv."
+                                )
+                    assert (
+                        self.per_device_train_batch_size % self.pipeline_parallel_micro_batch_size == 0
+                    ), "train_batch_size should be multiple of mirco_batch_size."
+                    pp_accumulate_steps = self.per_device_train_batch_size // self.pipeline_parallel_micro_batch_size
+
+                    strategy.pipeline_configs = {
+                        "accumulate_steps": pp_accumulate_steps,
+                        "micro_batch_size": self.pipeline_parallel_micro_batch_size,
+                        "enable_partial_send_recv": False
+                        if "disable_partial_send_recv" in pipeline_parallel_config
+                        else True,
+                        "p2p_cache_shape": False if "disable_p2p_cache_shape" in pipeline_parallel_config else True,
+                        # "delay_scale_loss": True, Fix ME
+                    }
+                    dygraph_pp_configs = {
+                        "delay_scale_loss": True if "enable_delay_scale_loss" in pipeline_parallel_config else False
+                    }
+
+                    if self.do_eval:
+                        assert self.per_device_train_batch_size == self.per_device_eval_batch_size, (
+                            "In pipeline model, the evaluation also shares same setting with training. "
+                            "Please set per_device_eval_batch_size=per_device_train_batch_size."
+                        )
+
+                if tensor_parallel_degree > 1:
+                    strategy.tensor_parallel_configs = {"tensor_init_seed": self.seed}
+
+                hybrid_configs = {
+                    "dp_degree": self.data_parallel_degree,
+                    "mp_degree": tensor_parallel_degree,
+                    "pp_degree": pipeline_parallel_degree,
+                    "sharding_degree": sharding_parallel_degree,
+                }
+
+                if pipeline_parallel_degree > 1:
+                    if dygraph_pp_configs["delay_scale_loss"]:
+                        hybrid_configs["pp_configs"] = dygraph_pp_configs
+
+                # setter once https://github.com/PaddlePaddle/Paddle/blob/b7295120b0e78b293cd7ae29706e21769d06a3cc/python/paddle/distributed/fleet/base/distributed_strategy.py#L1692
+                strategy.hybrid_configs = hybrid_configs
+                fleet.init(is_collective=True, strategy=strategy)
+
+                logger.info(strategy)
+
+        else:
+            world_size = paddle.distributed.get_world_size()
+            if world_size > 1:
+                if not paddle.distributed.parallel.parallel_helper._is_parallel_ctx_initialized():
+                    paddle.distributed.init_parallel_env()
 
         if self.report_to is None:
             logger.info(
@@ -675,25 +814,87 @@ class TrainingArguments:
         The number of processes used in parallel.
         """
         if self.local_rank != -1:
-            world_size = paddle.distributed.get_world_size()
-            # TODO use paddle.distributed.is_initialized() after paddle 2.4rc
-            if not paddle.distributed.parallel.parallel_helper._is_parallel_ctx_initialized():
-                if len(self.sharding) > 0:
-                    self.dp_degree = world_size // self.sharding_degree
-                    strategy = fleet.DistributedStrategy()
-                    strategy.hybrid_configs = {
-                        "dp_degree": self.dp_degree,
-                        "mp_degree": 1,
-                        "pp_degree": 1,
-                        "sharding_degree": self.sharding_degree,
-                    }
-                    fleet.init(is_collective=True, strategy=strategy)
-                    logger.info(strategy)
-                else:
-                    paddle.distributed.init_parallel_env()
-
-            return world_size
+            return paddle.distributed.get_world_size()
         return 1
+
+    @property
+    def data_parallel_rank(self):
+        if self.use_hybrid_parallel:
+            hcg = fleet.get_hybrid_communicate_group()
+            dp_group = hcg.get_data_parallel_group()
+            if dp_group.rank == -1:
+                return 0
+            return dp_group.rank
+        else:
+            return paddle.distributed.get_rank()
+
+    @property
+    def dataset_rank(self):
+        if self.use_hybrid_parallel:
+            return max(self.sharding_parallel_degree, 1) * self.data_parallel_rank + self.sharding_parallel_rank
+        else:
+            return paddle.distributed.get_rank()
+
+    @property
+    def dataset_world_size(self):
+        if self.use_hybrid_parallel:
+            return max(self.sharding_parallel_degree, 1) * max(self.data_parallel_degree, 1)
+        else:
+            return paddle.distributed.get_world_size()
+
+    @property
+    def sharding_parallel_rank(self):
+        if self.use_hybrid_parallel:
+            hcg = fleet.get_hybrid_communicate_group()
+            sharding_group = hcg.get_sharding_parallel_group()
+            return max(sharding_group.rank, 0)
+        else:
+            return 0
+
+    @property
+    def tensor_parallel_rank(self):
+        if self.use_hybrid_parallel:
+            hcg = fleet.get_hybrid_communicate_group()
+            tp_group = hcg.get_model_parallel_group()
+            return max(tp_group.rank, 0)
+        else:
+            return 0
+
+    @property
+    def pipeline_parallel_rank(self):
+        if self.use_hybrid_parallel:
+            hcg = fleet.get_hybrid_communicate_group()
+            rank = hcg.get_stage_id()
+            return max(rank, 0)
+        else:
+            return 0
+
+    @property
+    def optimizer_name_suffix(self):
+        if self.use_hybrid_parallel:
+            name = []
+            if self.tensor_parallel_degree > 1:
+                name.append(f"tp{self.tensor_parallel_rank:0>2d}")
+            if self.pipeline_parallel_degree > 1:
+                name.append(f"pp{self.pipeline_parallel_rank:0>2d}")
+            if self.sharding_parallel_degree > 1:
+                name.append(f"shard{self.sharding_parallel_rank:0>2d}")
+
+            return "_".join(name)
+        else:
+            return None
+
+    @property
+    def weight_name_suffix(self):
+        if self.use_hybrid_parallel:
+            name = []
+            if self.tensor_parallel_degree > 1:
+                name.append(f"tp{self.tensor_parallel_rank:0>2d}")
+            if self.pipeline_parallel_degree > 1:
+                name.append(f"pp{self.pipeline_parallel_rank:0>2d}")
+            return "_".join(name)
+        else:
+            return None
 
     @property
     def process_index(self):
@@ -727,11 +928,37 @@ class TrainingArguments:
     def should_save(self):
         """
         Whether or not the current process should write to disk, e.g., to save models and checkpoints.
+
+        For model state:
+            work for data parallel, tensor parallel, sharding
+        For optimizer state:
+            work for data parallel, tensor parallel
+            not work for sharding
         """
         if self.save_on_each_node:
             return self.local_process_index == 0
         else:
             return self.process_index == 0
+
+    @property
+    def should_save_model_state(self):
+        """
+        Whether or not the current process should write to disk, e.g., to save models and checkpoints.
+
+        For model state:
+            work for data parallel, tensor parallel, sharding
+        For optimizer state:
+            work for data parallel, tensor parallel
+            not work for sharding
+        """
+        if self.save_on_each_node:
+            return self.local_process_index == 0
+        else:
+            if self.tensor_parallel_degree > 1:
+                # save on dataset rank 0
+                return self.sharding_parallel_rank == 0 and self.data_parallel_rank == 0
+            else:
+                return self.process_index == 0
 
     @property
     def _no_sync_in_gradient_accumulation(self):
@@ -835,12 +1062,12 @@ class TrainingArguments:
             key = "Training"
 
         logger.info("{:^40}".format("{} Configuration Arguments".format(key)))
-        logger.info("{:30}:{}".format("paddle commit id", paddle.version.commit))
+        logger.info("{:30}: {}".format("paddle commit id", paddle.version.commit))
 
         for a in dir(args):
             if a[:2] != "__":  # don't print double underscore methods
                 v = getattr(args, a)
                 if not isinstance(v, types.MethodType):
-                    logger.info("{:30}:{}".format(a, v))
+                    logger.info("{:30}: {}".format(a, v))
 
         logger.info("")

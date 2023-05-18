@@ -12,15 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import sys
 import math
 import warnings
-from functools import partial
 
 import numpy as np
 import paddle
-from paddle.metric import Metric, Accuracy, Precision, Recall
+from paddle.metric import Accuracy, Metric, Precision, Recall
 
 __all__ = ["AccuracyAndF1", "Mcc", "PearsonAndSpearman", "MultiLabelsMetric"]
 
@@ -81,7 +78,7 @@ class AccuracyAndF1(Metric):
                 Predicted tensor, and its dtype is float32 or float64, and
                 has a shape of [batch_size, num_classes].
             label (Tensor):
-                The ground truth tensor, and its dtype is is int64, and has a
+                The ground truth tensor, and its dtype is int64, and has a
                 shape of [batch_size, 1] or [batch_size, num_classes] in one
                 hot representation.
 
@@ -618,7 +615,7 @@ class MultiLabelsMetric(Metric):
                 Predicted tensor, and its dtype is float32 or float64, and
                 has a shape of [batch_size, *, num_labels].
             label (Tensor):
-                The ground truth tensor, and its dtype is is int64, and has a
+                The ground truth tensor, and its dtype is int64, and has a
                 shape of [batch_size, *] or [batch_size, *, num_labels] in one
                 hot representation.
 
@@ -643,7 +640,7 @@ class MultiLabelsMetric(Metric):
                 raise ValueError(f"Tensor label has value {paddle.max(label)}, " f"which is no less than num_labels")
 
         if pred.shape[0] != label.shape[0]:
-            raise ValueError(f"The length of pred is not equal to the length of label")
+            raise ValueError("The length of pred is not equal to the length of label")
 
         return pred, label
 

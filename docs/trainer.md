@@ -29,7 +29,7 @@ from paddlenlp.transformers import AutoModelForSequenceClassification, AutoToken
 from paddlenlp.trainer import Trainer, TrainingArguments, PdArgumentParser
 ```
 2. 设置好用户参数
-    - PdArgumentParser 可以接受多个类似`TrainingArguments`的参数。用户可以自定义所需要的`ModelArguments`, `DataArguments`为为 tuple 传入 PdArgumentParser即可。
+    - PdArgumentParser 可以接受多个类似`TrainingArguments`的参数。用户可以自定义所需要的`ModelArguments`, `DataArguments`为 tuple 传入 PdArgumentParser即可。
     - 这些参数都是通过`python xxx.py --dataset xx --max_seq_length xx`的方式传入。`TrainingArguments`的所有可配置参数见后文。
 ```python
 from dataclasses import dataclass
@@ -184,7 +184,7 @@ Trainer 是一个简单，但功能完整的 Paddle训练和评估模块，并�
 ## TrainingArguments 参数介绍
 ```python
   --output_dir
-                        保存模型输出和和中间checkpoints的输出目录。(`str`, 必须, 默认为 `None`)
+                        保存模型输出和中间checkpoints的输出目录。(`str`, 必须, 默认为 `None`)
 
                         The output directory where the model predictions and
                         checkpoints will be written. (default: None)
@@ -248,6 +248,16 @@ Trainer 是一个简单，但功能完整的 Paddle训练和评估模块，并�
 
                         Number of updates steps to accumulate before
                         performing a backward/update pass. (default: 1)
+
+  --eval_accumulation_steps
+                        在将结果移动到CPU之前，累积输出张量的预测步骤数。如果如果未设置，
+                        则在移动到CPU之前，整个预测都会在GPU上累积（速度更快需要更多的显存）。
+                        （`int`，可选，默认为 None 不设置）
+
+                        Number of predictions steps to accumulate the output tensors for,
+                        before moving the results to the CPU. If left unset, the whole predictions are
+                        accumulated on GPU before being moved to the CPU (faster butrequires more memory)
+                        (default: None)
 
   --learning_rate
                         优化器的初始学习率, （`float`，可选，默认为 5e-05）
@@ -540,7 +550,7 @@ Trainer 是一个简单，但功能完整的 Paddle训练和评估模块，并�
                         data. (default: False)
 
   --optim
-                        优化器名称，默认为adamw，，(`str`, 可选，默认为 `adamw`)
+                        优化器名称，默认为adamw，(`str`, 可选，默认为 `adamw`)
                         The optimizer to use. (default: adamw)
 
   --report_to

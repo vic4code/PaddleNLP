@@ -16,6 +16,14 @@ from __future__ import annotations
 
 from paddlenlp.transformers.configuration_utils import PretrainedConfig
 
+__all__ = [
+    "ERNIE_CTM_CONFIG",
+    "ERNIE_CTM_PRETRAINED_INIT_CONFIGURATION",
+    "ERNIE_CTM_PRETRAINED_RESOURCE_FILES_MAP",
+    "ErnieCtmConfig",
+]
+
+
 ERNIE_CTM_CONFIG = {
     "vocab_size": 23000,
     "embedding_size": 128,
@@ -44,9 +52,9 @@ ERNIE_CTM_PRETRAINED_INIT_CONFIGURATION = {
 
 ERNIE_CTM_PRETRAINED_RESOURCE_FILES_MAP = {
     "model_state": {
-        "ernie-ctm": "https://bj.bcebos.com/paddlenlp/models/transformers/ernie_ctm/ernie_ctm_v2.pdparams",
-        "wordtag": "https://bj.bcebos.com/paddlenlp/models/transformers/ernie_ctm/wordtag_v2.pdparams",
-        "nptag": "https://bj.bcebos.com/paddlenlp/models/transformers/ernie_ctm/nptag_v2.pdparams",
+        "ernie-ctm": "https://bj.bcebos.com/paddlenlp/models/transformers/ernie_ctm/ernie_ctm_v3.pdparams",
+        "wordtag": "https://bj.bcebos.com/paddlenlp/models/transformers/ernie_ctm/wordtag_v3.pdparams",
+        "nptag": "https://bj.bcebos.com/paddlenlp/models/transformers/ernie_ctm/nptag_v3.pdparams",
     }
 }
 
@@ -98,7 +106,7 @@ class ErnieCtmConfig(PretrainedConfig):
     """
     model_type = "ernie-ctm"
     pretrained_init_configuration = ERNIE_CTM_PRETRAINED_INIT_CONFIGURATION
-    attribute_map = {"num_tag": "num_labels", "dropout": "classifier_dropout"}
+    attribute_map = {"num_tag": "num_labels", "dropout": "classifier_dropout", "num_classes": "num_labels"}
 
     def __init__(
         self,

@@ -48,7 +48,6 @@ class RoFormerMeanPoolingForSequenceClassification(RoFormerPretrainedModel):
         self.num_classes = num_classes
         self.roformer = roformer
         self.classifier = nn.Linear(self.roformer.config["hidden_size"], num_classes)
-        self.apply(self.init_weights)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None):
         last_hidden_state = self.roformer(input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask)[0]
@@ -148,8 +147,8 @@ def parse_args():
         "--device",
         default="gpu",
         type=str,
-        choices=["cpu", "gpu", "xpu"],
-        help="The device to select to train the model, is must be cpu/gpu/xpu.",
+        choices=["cpu", "gpu", "xpu", "npu"],
+        help="The device to select to train the model, is must be cpu/gpu/xpu/npu.",
     )
     parser.add_argument(
         "--use_amp",
