@@ -122,8 +122,8 @@ def paddlenlp_load(path, return_numpy=False):
 def is_dp_group_support_in_group_sharded_parallel():
     return "dp_group" in set(inspect.signature(paddle.distributed.sharding.group_sharded_parallel).parameters.keys())
 
-
-__all__ = ["Trainer"]
+# Open to import all modules 
+# __all__ = ["Trainer"]
 
 
 class Trainer:

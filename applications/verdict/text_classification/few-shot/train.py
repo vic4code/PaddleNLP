@@ -53,6 +53,22 @@ class ModelArguments:
 
 
 class PromptTrainer(PromptTrainer):
+    def chunking(self, dataset, max_length=self.args.max_length, prompt=self.args.prompt, other_tokens_length=4):
+        
+        sequence = dataset['text_a']
+        sequence_length = len(sequence)
+        divider = max_length - len(prompt) - other_tokens_length
+        num_chunks = sequence_length // divider
+        chunked_dataset = []
+
+        for i in range(num_chunks):
+            chunked_dataset.append(sequence[i:i + i ])
+        
+
+        chunked_dataset = dataset
+        return chunked_dataset
+    
+
     def compute_loss(self, model, inputs, return_outputs=False):
         """
         Compute the total loss for every batch.
@@ -143,7 +159,7 @@ class PromptTrainer(PromptTrainer):
                 gathering predictions for evaluation during the training.
         """
 
-        # print(self.train_dataset.__getitem__(0), self.train_dataset.__getitem__(0)['input_ids'].shape)
+        print(self.train_dataset.__getitem__(0), len(self.train_dataset.__getitem__(0)['input_ids']))
 
         args = self.args
         self.is_in_train = True
@@ -184,7 +200,7 @@ class PromptTrainer(PromptTrainer):
             del state_dict
 
         train_dataloader = self.get_train_dataloader()
-        print(train_dataloader)
+        print(dir(train_dataloader))
 
         total_train_batch_size = args.train_batch_size * args.gradient_accumulation_steps * args.dataset_world_size
         len_dataloader = None
@@ -561,7 +577,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
 
     text = tokenizer.convert_ids_to_tokens([1, 17416, 19509, 1397, 19574, 31, 58, 72, 245, 119, 104, 19676, 505, 1079, 19619, 3930, 17, 130, 1397, 19676, 436, 131, 4552, 9490, 19505, 250, 612, 338, 2763, 12456, 171, 612, 17555, 19660, 992, 204, 19748, 20011, 140, 38, 8, 19588, 826, 3586, 28, 517, 250, 612, 196, 171, 612, 19479, 603, 19719, 755, 487, 259, 4, 160, 200, 1342, 104, 912, 19578, 119, 104, 19748, 20011, 19556, 323, 1420, 19587, 40, 19465, 15012, 755, 19977, 19927, 12052, 276, 124, 12053, 104, 259, 4, 19480, 89, 245, 1342, 104, 911, 1405, 91, 728, 798, 152, 19472, 4, 89, 245, 1789, 119, 19466, 3930, 17, 768, 136, 1900, 139, 545, 19782, 19951, 19561, 19680, 19538, 4, 19469, 1056, 19564, 41, 392, 718, 5, 41, 503, 9, 3, 2])
-    print(text)
+    print(text, len(text))
 
     # Define the template for preprocess and the verbalizer for postprocess.
     template = AutoTemplate.create_from(
