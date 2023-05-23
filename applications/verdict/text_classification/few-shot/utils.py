@@ -17,7 +17,7 @@ import os
 from paddlenlp.datasets import load_dataset
 
 
-def load_local_dataset(data_path, splits, label_list):
+def load_local_dataset(data_path, splits, label_list, chunk_len=None, prompt=None, other_tokens_length=None, overlap_length=None):
     """
     Load dataset for multi-label classification from files, where
     there is one example per line. Text and label are seperated
@@ -33,12 +33,38 @@ def load_local_dataset(data_path, splits, label_list):
             The dictionary that maps labels to indeces.
     """
 
-    def _reader(data_file, label_list):
+    def chunker(text, chunk_len, prompt, other_tokens_length, overlap_length):
+        # other_tokens: [CLS], [MASK], [SEP]
+        if chunk_len:
+            sequence_length = len(text)
+            # divider = chunk_len - len(prompt) - other_tokens_length
+            divider = chunk_len
+            num_chunks = sequence_length // divider if sequence_length % divider == 0 else sequence_length // divider + 1
+            chunks = []
+
+            i = 0
+            while i < num_chunks:
+                start, end = i * divider - overlap_length if i * divider - overlap_length >= 0 else i * divider , (i + 1) * divider
+                chunks.append(text[start:end])
+                i += 1
+
+            return chunks
+
+
+    def _reader(data_file, label_list, chunk_len=chunk_len, overlap_length=overlap_length):
         with open(data_file, "r", encoding="utf-8") as fp:
             for idx, line in enumerate(fp):
                 data = line.strip().split("\t")
                 if len(data) == 1:
                     yield {"text_a": data[0]}
+                elif chunk_len:
+                    text, label = data
+                    label = label.strip().split(",")
+                    label = [float(1) if x in label else float(0) for x in label_list]
+                    chunks = chunker(text, chunk_len, prompt, other_tokens_length, overlap_length)
+
+                    for nth, chunk in enumerate(chunks) :
+                        yield {"id": idx , "nth_chunk": nth, "text_a": chunk, "labels": label}
                 else:
                     text, label = data
                     label = label.strip().split(",")

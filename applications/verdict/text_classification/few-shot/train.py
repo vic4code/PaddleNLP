@@ -35,6 +35,9 @@ from paddlenlp.transformers import AutoModelForMaskedLM, AutoTokenizer
 from paddlenlp.utils.log import logger
 
 from paddlenlp.trainer.trainer import *
+from paddlenlp.transformers.model_utils import PretrainedModel, _add_variant, unwrap_model
+from paddlenlp.prompt.prompt_utils import *
+
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 
@@ -43,6 +46,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 class DataArguments:
     data_dir: str = field(default="./data", metadata={"help": "The dataset dictionary includes train.txt, dev.txt and label.txt files."})
     prompt: str = field(default=None, metadata={"help": "The input prompt for tuning."})
+    # dataloader_drop_last: bool = field(default=True, metadata={"help": "Drop the last for uncomplete batch"})
 
 
 @dataclass
@@ -52,95 +56,144 @@ class ModelArguments:
 # yapf: enable
 
 
+class PromptDataCollatorWithPadding(PromptDataCollatorWithPadding):
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+        self.default_model_input_names : List = (
+            "input_ids",
+            "token_type_ids",
+            "special_tokens_mask",
+            "offset_mapping",
+            "position_ids",
+            "id",
+            "nth_chunk"
+        )
+        
+        batch = {}
+        for key in features[0]:
+            if key in self.default_model_input_names:
+                batch[key] = [b[key] for b in features]
+
+        batch = self.tokenizer.pad(
+            batch,
+            padding=self.padding,
+            max_length=self.max_length,
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            return_tensors=self.return_tensors,
+            return_attention_mask=self.return_attention_mask,
+        )
+        max_length = batch["input_ids"].shape[1]
+        for key in features[0]:
+            if key not in self.default_model_input_names:
+                values = [b[key] for b in features if key in b]
+                if len(values) < len(features):
+                    continue
+                if key == "masked_positions":
+                    new_values = []
+                    for index, value in enumerate(values):
+                        value = np.array(value) + index * max_length
+                        new_values.extend(value.tolist())
+                    values = new_values
+                elif key == "attention_mask":
+                    new_values = np.ones([len(values), 1, max_length, max_length]) * -1e4
+                    for index, value in enumerate(values):
+                        length = len(value)
+                        new_values[index][0, :length, :length] = value
+                    values = new_values
+                elif key in ("soft_token_ids", "encoder_ids"):
+                    for index, value in enumerate(values):
+                        values[index] = value + [0] * (max_length - len(value))
+                elif key in ("omask_positions"):
+                    max_num_option = max([len(x) for x in values])
+                    for index, value in enumerate(values):
+                        values[index] = value + [0] * (max_num_option - len(value))
+                elif key == "labels":
+                    if isinstance(values[0], list):
+                        max_num_label = max([len(x) for x in values])
+                        for index, value in enumerate(values):
+                            values[index] = value + [-100] * (max_num_label - len(value))
+                elif key != "cls_positions":
+                    continue
+                batch[key] = self._convert_to_tensors(values)
+        
+        return batch
+
+
 class PromptTrainer(PromptTrainer):
-    def chunking(self, dataset, max_length=self.args.max_length, prompt=self.args.prompt, other_tokens_length=4):
-        
-        sequence = dataset['text_a']
-        sequence_length = len(sequence)
-        divider = max_length - len(prompt) - other_tokens_length
-        num_chunks = sequence_length // divider
-        chunked_dataset = []
+    def _get_train_sampler(self) -> Optional[paddle.io.Sampler]:
+        if self.train_dataset is None or not has_length(self.train_dataset):
+            return None
 
-        for i in range(num_chunks):
-            chunked_dataset.append(sequence[i:i + i ])
-        
+        if self.args.world_size <= 1:
+            return paddle.io.BatchSampler(
+                dataset=self.train_dataset,
+                shuffle=False,
+                batch_size=self.args.per_device_train_batch_size,
+                drop_last=self.args.dataloader_drop_last,
+            )
 
-        chunked_dataset = dataset
-        return chunked_dataset
+        return DistributedBatchSampler(
+            self.train_dataset,
+            batch_size=self.args.per_device_train_batch_size,
+            shuffle=False,
+            num_replicas=self.args.dataset_world_size,
+            rank=self.args.dataset_rank,
+            drop_last=self.args.dataloader_drop_last,
+        )
     
+    def _get_eval_sampler(self, eval_dataset: Dataset):
+        if self.args.world_size <= 1:
+            return paddle.io.BatchSampler(
+                eval_dataset,
+                batch_size=self.args.per_device_eval_batch_size,
+                shuffle=False,
+                drop_last=True,
+            )
+        else:
+            drop_last = True
+            if self.args.pipeline_parallel_degree > 1:
+                drop_last = True
+                logger.warning(
+                    "In parallel mode, the bacth_size is strictly checked. set DistributedBatchSampler drop_last=True."
+                )
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+            return DistributedBatchSampler(
+                eval_dataset,
+                num_replicas=self.args.dataset_world_size,
+                rank=self.args.dataset_rank,
+                batch_size=self.args.per_device_eval_batch_size,
+                shuffle=False,
+                drop_last=drop_last,
+            )
+        
+    def compute_forward(self, model, inputs):
         """
         Compute the total loss for every batch.
         """
+
+        # model outputs depend on the args
+        input_dict = inputs.copy()
+        loss, logits = model(**input_dict)
+    
+        return loss, logits
+
+
+    def compute_loss(self, inputs, logits, return_outputs=True):
+        """
+        Compute the total loss for every batch.
+        """
+
         if "labels" not in inputs:
             raise ValueError("Fail to compute loss as `labels` not in {}.".format(inputs))
-        labels = inputs["labels"]
+        
+        labels = inputs["labels"][-1, :].unsqueeze(axis=0)
+        # print('loss input', logits, labels)
 
-        input_dict = inputs.copy()
+        loss = self.criterion(logits, labels)
+        # print('loss val:', loss)
 
-        sequence_len = input_dict['input_ids'].shape[-1]
-        # input_ids[:, ]
-        # inpu
-        # print(input_dict, input_dict.keys())
-        # return
+        return loss
 
-        if self.criterion is not None:
-            # pop labels to move loss computation out of the model
-            input_dict.pop("labels")
-            input_dict["return_hidden_states"] = True
-            logits, hidden_states = model(**input_dict)
-            loss = self.criterion(logits, labels)
 
-            if self.args.use_rdrop:
-                loss = self._compute_rdrop_loss(model, input_dict, labels, logits, loss)
-
-            if self.args.use_rgl:
-                loss += self._compute_rgl_loss(hidden_states, labels)
-        else:
-            loss, logits = model(**input_dict)
-
-        outputs = (loss, logits)
-
-        return (loss, outputs) if return_outputs else loss
-
-    def training_step(self, model: nn.Layer, inputs: Dict[str, Union[paddle.Tensor, Any]]) -> paddle.Tensor:
-        """
-        Perform a training step on a batch of inputs.
-
-        Subclass and override to inject custom behavior.
-
-        Args:
-            model (`nn.Layer`):
-                The model to train.
-            inputs (`Dict[str, Union[paddle.Tensor, Any]]`):
-                The inputs and targets of the model.
-
-                The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
-                argument `labels`. Check your model's documentation for all accepted arguments.
-
-        Return:
-            `paddle.Tensor`: The tensor with training loss on this batch.
-        """
-        if self.args.pipeline_parallel_degree > 1:
-            return self.training_pipeline_step(model, inputs)
-
-        model.train()
-        inputs = self._prepare_inputs(inputs)
-
-        with self.autocast_smart_context_manager():
-            loss = self.compute_loss(model, inputs)
-
-        if self.args.gradient_accumulation_steps > 1:
-            loss = loss / self.args.gradient_accumulation_steps
-
-        if self.do_grad_scaling:
-            self.scaler.scale(loss).backward()
-        else:
-            loss.backward()
-
-        return loss.detach()
-    
     def train(
         self,
         resume_from_checkpoint: Optional[Union[str, bool]] = None,
@@ -159,7 +212,7 @@ class PromptTrainer(PromptTrainer):
                 gathering predictions for evaluation during the training.
         """
 
-        print(self.train_dataset.__getitem__(0), len(self.train_dataset.__getitem__(0)['input_ids']))
+        # print("length of train_dataset", self.train_dataset.data.__len__(), self.train_dataset.__getitem__(0), len(self.train_dataset.__getitem__(0)['input_ids']))
 
         args = self.args
         self.is_in_train = True
@@ -200,7 +253,7 @@ class PromptTrainer(PromptTrainer):
             del state_dict
 
         train_dataloader = self.get_train_dataloader()
-        print(dir(train_dataloader))
+        # print(dir(train_dataloader))
 
         total_train_batch_size = args.train_batch_size * args.gradient_accumulation_steps * args.dataset_world_size
         len_dataloader = None
@@ -330,7 +383,7 @@ class PromptTrainer(PromptTrainer):
                     logger.info(f"Set DistributedBatchSampler consumed_samples to {consumed_samples}")
 
         epoch_iterator = train_dataloader
-        
+        # print([*epoch_iterator][0])
         # steps_in_epoch = len(epoch_iterator)
         steps_in_epoch = (
             len(epoch_iterator) if len_dataloader is not None else args.max_steps * args.gradient_accumulation_steps
@@ -364,13 +417,17 @@ class PromptTrainer(PromptTrainer):
                 train_dataloader.batch_sampler.set_epoch(epoch)
 
             step = -1
-
             self.control = self.callback_handler.on_epoch_begin(args, self.state, self.control)
+
+            id_marker = next(iter(epoch_iterator))['id']
+            accum_logits = 0
+            tmp_batch = None
 
             for step, inputs in enumerate(epoch_iterator):
                 # Skip past any already trained steps if resuming training
                 # for paddlenlp.utils.batch_sampler.DistributedBatchSampler
                 # We use consumed_samples to reset the status
+                
                 if isinstance(train_dataloader, paddle.io.DataLoader) and isinstance(
                     train_dataloader.batch_sampler, NlpDistributedBatchSampler
                 ):
@@ -419,14 +476,62 @@ class PromptTrainer(PromptTrainer):
                 # stage1. the same as ddp
                 # stage2. manualy collect gradient on dp group
 
-                if is_no_sync:
-                    # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.
-                    with model.no_sync():
-                        tr_loss_step = self.training_step(model, inputs)
-                else:
-                    tr_loss_step = self.training_step(model, inputs)
+                model.train()
+                inputs = self._prepare_inputs(inputs)
+                # print('current id:', inputs['id'], 'current nth chunks', inputs['nth_chunk'], 'marker_id', id_marker)
 
-                tr_loss += tr_loss_step
+                if False not in (inputs['id'] == id_marker):
+                    tmp_batch = inputs
+                    if is_no_sync:
+                        # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.
+                        with model.no_sync():
+                            _, logits = self.compute_forward(model, inputs)
+                    else:
+                        _, logits = self.compute_forward(model, inputs)
+
+                    accum_logits = accum_logits + logits.sum(axis=0, keepdim=True)
+                    
+                    if step == len(epoch_iterator) - 1 or len(epoch_iterator) == 1:
+                        with self.autocast_smart_context_manager():
+                            accum_logits = paddle.nn.functional.sigmoid(accum_logits)
+                            # print('last batch:', accum_logits)
+                            loss = self.compute_loss(inputs, logits=paddle.nn.functional.sigmoid(accum_logits))
+
+                            if self.args.gradient_accumulation_steps > 1:
+                                loss = loss / self.args.gradient_accumulation_steps
+
+                            if self.do_grad_scaling:
+                                self.scaler.scale(loss).backward()
+                            else:
+                                loss.backward()
+                    continue
+        
+                else:
+                    # Update marker
+                    # print('current', inputs['id'])
+                    id_marker = paddle.repeat_interleave(inputs['id'][-1], self.args.per_device_train_batch_size)
+                    inputs = inputs if step == len(epoch_iterator) - 1 else tmp_batch
+
+                    # print('calculate loss by verdict before sigmoid:', accum_logits)
+                    # print('current id:', inputs['id'], 'marker_id', id_marker)
+                    accum_logits = paddle.nn.functional.sigmoid(accum_logits)
+                    # print('calculate loss by verdict after sigmoid:', accum_logits)
+
+                    with self.autocast_smart_context_manager():
+                        loss = self.compute_loss(inputs, logits=accum_logits)
+
+                    if self.args.gradient_accumulation_steps > 1:
+                        loss = loss / self.args.gradient_accumulation_steps
+
+                    if self.do_grad_scaling:
+                        self.scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
+                    
+                    accum_logits = 0
+
+                # print(loss.detach())
+                tr_loss += loss.detach()
 
                 if (step + 1) % args.gradient_accumulation_steps == 0 or (
                     # last step in epoch but step is always smaller than gradient_accumulation_steps
@@ -492,6 +597,8 @@ class PromptTrainer(PromptTrainer):
                     self.state.epoch = epoch + (step + 1) / steps_in_epoch
 
                     self.control = self.callback_handler.on_step_end(args, self.state, self.control)
+
+                    
                     self._maybe_log_save_evaluate(tr_loss, model, epoch, ignore_keys_for_eval, inputs=inputs)
                 else:
                     self.control = self.callback_handler.on_substep_end(args, self.state, self.control)
@@ -508,6 +615,8 @@ class PromptTrainer(PromptTrainer):
                 self.control.should_training_stop = True
 
             self.control = self.callback_handler.on_epoch_end(args, self.state, self.control)
+
+            # print('eval_input', inputs)
             self._maybe_log_save_evaluate(tr_loss, model, epoch, ignore_keys_for_eval, inputs=inputs)
 
             if self.control.should_training_stop:
@@ -563,10 +672,324 @@ class PromptTrainer(PromptTrainer):
         return TrainOutput(self.state.global_step, train_loss, metrics)
 
 
+    def evaluate(
+        self,
+        eval_dataset: Optional[Dataset] = None,
+        ignore_keys: Optional[List[str]] = None,
+        metric_key_prefix: str = "eval",
+    ) -> Dict[str, float]:
+        """
+        Run evaluation and returns metrics.
+
+        The calling script will be responsible for providing a method to compute metrics, as they are task-dependent
+        (pass it to the init `compute_metrics` argument).
+
+        You can also subclass and override this method to inject custom behavior.
+
+        Args:
+            eval_dataset (`Dataset`, *optional*):
+                Pass a dataset if you wish to override `self.eval_dataset`. If it is an `datasets.Dataset`, columns not
+                accepted by the `model.forward()` method are automatically removed. It must implement the `__len__`
+                method.
+            ignore_keys (`Lst[str]`, *optional*):
+                A list of keys in the output of your model (if it is a dictionary) that should be ignored when
+                gathering predictions.
+            metric_key_prefix (`str`, *optional*, defaults to `"eval"`):
+                An optional prefix to be used as the metrics key prefix. For example the metrics "bleu" will be named
+                "eval_bleu" if the prefix is "eval" (default)
+
+        Returns:
+            A dictionary containing the evaluation loss and the potential metrics computed from the predictions. The
+            dictionary also contains the epoch number which comes from the training state.
+        """
+        # memory metrics - must set up as early as possible
+        self._memory_tracker.start()
+
+        eval_dataloader = self.get_eval_dataloader(eval_dataset)
+        start_time = time.time()
+
+        output = self.evaluation_loop(
+            eval_dataloader,
+            description="Evaluation",
+            # No point gathering the predictions if there are no metrics, otherwise we defer to
+            # self.args.prediction_loss_only
+            prediction_loss_only=True if self.compute_metrics is None else None,
+            ignore_keys=ignore_keys,
+            metric_key_prefix=metric_key_prefix,
+        )
+
+        total_batch_size = self.args.eval_batch_size * self.args.dataset_world_size
+        output.metrics.update(
+            speed_metrics(
+                metric_key_prefix,
+                start_time,
+                num_samples=output.num_samples,
+                num_steps=math.ceil(output.num_samples / total_batch_size),
+            )
+        )
+
+        self.log(output.metrics)
+
+        self.control = self.callback_handler.on_evaluate(self.args, self.state, self.control, output.metrics)
+
+        self._memory_tracker.stop_and_update_metrics(output.metrics)
+
+        return output.metrics
+
+    def evaluation_loop(
+        self,
+        dataloader: DataLoader,
+        description: str,
+        prediction_loss_only: Optional[bool] = None,
+        ignore_keys: Optional[List[str]] = None,
+        metric_key_prefix: str = "eval",
+        max_eval_iters: Optional[int] = -1,
+    ) -> EvalLoopOutput:
+        """
+        Prediction/evaluation loop, shared by `Trainer.evaluate()` and `Trainer.predict()`.
+
+        Works both with or without labels.
+        """
+        args = self.args
+
+        prediction_loss_only = prediction_loss_only if prediction_loss_only is not None else args.prediction_loss_only
+
+        if self.args.pipeline_parallel_degree > 1:
+            # Only accept wrapped model for pipeline_parallel mode
+            model = self.model_wrapped
+        else:
+            model = self.model
+
+        if isinstance(dataloader, paddle.io.DataLoader):
+            batch_size = dataloader.batch_sampler.batch_size
+        elif isinstance(dataloader, paddle.fluid.dataloader.dataloader_iter._DataLoaderIterBase):
+            # support for inner dataloader
+            batch_size = dataloader._batch_sampler.batch_size
+            # alias for inner dataloader
+            dataloader.dataset = dataloader._dataset
+        else:
+            raise ValueError("Only support for paddle.io.DataLoader")
+
+        num_samples = None
+        if max_eval_iters > 0:
+            # on eval limit steps
+            num_samples = batch_size * self.args.dataset_world_size * max_eval_iters
+            if isinstance(dataloader, paddle.fluid.dataloader.dataloader_iter._DataLoaderIterBase) and isinstance(
+                dataloader._batch_sampler, NlpDistributedBatchSampler
+            ):
+                consumed_samples = (
+                    ((self.state.global_step) // args.eval_steps)
+                    * max_eval_iters
+                    * args.per_device_eval_batch_size
+                    * args.dataset_world_size
+                )
+                dataloader._batch_sampler.set_epoch(consumed_samples=consumed_samples)
+
+        logger.info(f"***** Running {description} *****")
+        if has_length(dataloader):
+            logger.info(f"  Num examples = {self.num_examples(dataloader)}")
+            if max_eval_iters > 0:
+                logger.info(f"  Total prediction steps = {max_eval_iters}")
+            else:
+                logger.info(f"  Total prediction steps = {len(dataloader)}")
+        else:
+            logger.info("  Num examples: Unknown")
+            if max_eval_iters > 0:
+                logger.info(f"  Total prediction steps = {max_eval_iters}")
+
+        logger.info(f"  Pre device batch size = {batch_size}")
+        logger.info(f"  Total Batch size = {batch_size * self.args.dataset_world_size}")
+
+        model.eval()
+
+        self.callback_handler.eval_dataloader = dataloader
+        # Do this before wrapping.
+        eval_dataset = dataloader.dataset
+
+        if args.past_index >= 0:
+            self._past = None
+
+        # Initialize containers
+        # losses/preds/labels on GPU (accumulated for eval_accumulation_steps)
+        losses_host = None
+        preds_host = None
+        labels_host = None
+        # losses/preds/labels on CPU (final containers)
+        all_losses = None
+        all_preds = None
+        all_labels = None
+        # Will be useful when we have an iterable dataset so don't know its length.
+
+        observed_num_examples = 0
+        # Main evaluation loop
+        losses = []
+        tmp_batch = None
+        id_marker = next(iter(dataloader))['id']
+        accum_logits = 0
+
+        for step, inputs in enumerate(dataloader):
+            # Update the observed num examples
+            observed_batch_size = find_batch_size(inputs)
+            if observed_batch_size is not None:
+                observed_num_examples += observed_batch_size
+                # For batch samplers, batch_size is not known by the dataloader in advance.
+                if batch_size is None:
+                    batch_size = observed_batch_size
+
+            # Prediction step
+            # loss, logits, labels = self.prediction_step(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
+
+            # print('eval', inputs['id'], id_marker)
+            if False not in (inputs['id'] == id_marker):
+                tmp_batch = inputs
+
+                if self.args.pipeline_parallel_degree > 1:
+                # hack for pipeline mode
+                    return self.prediction_pipeline_step(model, inputs, prediction_loss_only, ignore_keys)
+
+                has_labels = all(inputs.get(k) is not None for k in self.label_names)
+                inputs = self._prepare_inputs(inputs)
+                if ignore_keys is None:
+                    if hasattr(self.model, "config"):
+                        ignore_keys = getattr(self.model.config, "keys_to_ignore_at_inference", [])
+                    else:
+                        ignore_keys = []
+
+                # labels may be popped when computing the loss (label smoothing for instance) so we grab them first.
+                if has_labels:
+                    labels = nested_detach(tuple(inputs.get(name) for name in self.label_names))
+                    if len(labels) == 1:
+                        labels = labels[0]
+                else:
+                    labels = None
+
+                with paddle.no_grad():
+                    # Model forward
+                    if has_labels:
+                        with self.autocast_smart_context_manager():
+                            _, logits = self.compute_forward(model, inputs)
+                            accum_logits = accum_logits + logits.sum(axis=0, keepdim=True)
+                            continue
+                    
+                    # Calculate accum logits
+                    if step == len(dataloader) - 1 or len(dataloader) == 1:
+                        with self.autocast_smart_context_manager():
+                            accum_logits = paddle.nn.functional.sigmoid(accum_logits)
+                            loss = self.compute_loss(inputs, logits=paddle.nn.functional.sigmoid(accum_logits))
+
+                        loss = loss.mean().detach()
+                    logits = accum_logits
+                
+            else:
+                # Update marker
+                id_marker = paddle.repeat_interleave(inputs['id'][-1], self.args.per_device_train_batch_size)
+                inputs = inputs if step == len(dataloader) - 1 else tmp_batch
+                accum_logits = paddle.nn.functional.sigmoid(accum_logits)
+
+                with self.autocast_smart_context_manager():
+                    loss = self.compute_loss(inputs, logits=accum_logits)
+
+                logits = accum_logits
+                accum_logits = 0
+
+            labels = inputs['labels'][-1].unsqueeze(0)
+
+            # Update containers on host
+            if loss is not None:
+                # losses = self._nested_gather(loss.repeat(batch_size))
+                losses = self._nested_gather(paddle.tile(loss, repeat_times=[batch_size, 1]))
+                losses_host = losses if losses_host is None else paddle.concat((losses_host, losses), axis=0)
+            if labels is not None:
+                labels = self._pad_across_processes(labels)
+                labels = self._nested_gather(labels)
+                labels_host = labels if labels_host is None else nested_concat(labels_host, labels, padding_index=-100)
+            if logits is not None:
+                logits = self._pad_across_processes(logits)
+                logits = self._nested_gather(logits)
+                if self.preprocess_logits_for_metrics is not None:
+                    logits = self.preprocess_logits_for_metrics(logits, labels)
+                preds_host = logits if preds_host is None else nested_concat(preds_host, logits, padding_index=-100)
+            self.control = self.callback_handler.on_prediction_step(args, self.state, self.control)
+
+            # Gather all tensors and put them back on the CPU if we have done enough accumulation steps.
+            if args.eval_accumulation_steps is not None and (step + 1) % args.eval_accumulation_steps == 0:
+                if losses_host is not None:
+                    losses = nested_numpify(losses_host)
+                    all_losses = losses if all_losses is None else np.concatenate((all_losses, losses), axis=0)
+                if preds_host is not None:
+                    logits = nested_numpify(preds_host)
+                    all_preds = logits if all_preds is None else nested_concat(all_preds, logits, padding_index=-100)
+
+                if labels_host is not None:
+                    labels = nested_numpify(labels_host)
+                    all_labels = (
+                        labels if all_labels is None else nested_concat(all_labels, labels, padding_index=-100)
+                    )
+
+                # Set back to None to begin a new accumulation
+                losses_host, preds_host, labels_host = None, None, None
+
+            if max_eval_iters > 0 and step >= max_eval_iters - 1:
+                break
+
+        # Gather all remaining tensors and put them back on the CPU
+        if losses_host is not None:
+            losses = nested_numpify(losses_host)
+            all_losses = losses if all_losses is None else np.concatenate((all_losses, losses), axis=0)
+        if preds_host is not None:
+            logits = nested_numpify(preds_host)
+            all_preds = logits if all_preds is None else nested_concat(all_preds, logits, padding_index=-100)
+        if labels_host is not None:
+            labels = nested_numpify(labels_host)
+            all_labels = labels if all_labels is None else nested_concat(all_labels, labels, padding_index=-100)
+
+        # Number of samples
+        if num_samples is not None:
+            pass
+        elif has_length(eval_dataset):
+            num_samples = len(eval_dataset)
+        # The instance check is weird and does not actually check for the type, but whether the dataset has the right
+        # methods. Therefore we need to make sure it also has the attribute.
+        elif isinstance(eval_dataset, IterableDatasetShard) and hasattr(eval_dataset, "num_examples"):
+            num_samples = eval_dataset.num_examples
+        else:
+            if has_length(dataloader):
+                num_samples = self.num_examples(dataloader)
+            else:  # both len(dataloader.dataset) and len(dataloader) fail
+                num_samples = observed_num_examples
+
+        # Number of losses has been rounded to a multiple of batch_size and in a distributed training, the number of
+        # samplers has been rounded to a multiple of batch_size, so we truncate.
+        if all_losses is not None:
+            all_losses = all_losses[:num_samples]
+        if all_preds is not None:
+            all_preds = nested_truncate(all_preds, num_samples)
+        if all_labels is not None:
+            all_labels = nested_truncate(all_labels, num_samples)
+
+        model.train()
+        # Metrics!
+        if self.compute_metrics is not None and all_preds is not None and all_labels is not None:
+            metrics = self.compute_metrics(EvalPrediction(predictions=all_preds, label_ids=all_labels))
+        else:
+            metrics = {}
+
+        if all_losses is not None:
+            metrics[f"{metric_key_prefix}_loss"] = all_losses.mean().item()
+
+        # Prefix all keys with metric_key_prefix + '_'
+        for key in list(metrics.keys()):
+            if not key.startswith(f"{metric_key_prefix}_"):
+                metrics[f"{metric_key_prefix}_{key}"] = metrics.pop(key)
+
+        return EvalLoopOutput(predictions=all_preds, label_ids=all_labels, metrics=metrics, num_samples=num_samples)
+
+
 def main():
     # Parse the arguments.
     parser = PdArgumentParser((ModelArguments, DataArguments, PromptTuningArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
     training_args.print_config(model_args, "Model")
     training_args.print_config(data_args, "Data")
 
@@ -576,8 +999,13 @@ def main():
     model = AutoModelForMaskedLM.from_pretrained(model_args.model_name_or_path)
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
 
-    text = tokenizer.convert_ids_to_tokens([1, 17416, 19509, 1397, 19574, 31, 58, 72, 245, 119, 104, 19676, 505, 1079, 19619, 3930, 17, 130, 1397, 19676, 436, 131, 4552, 9490, 19505, 250, 612, 338, 2763, 12456, 171, 612, 17555, 19660, 992, 204, 19748, 20011, 140, 38, 8, 19588, 826, 3586, 28, 517, 250, 612, 196, 171, 612, 19479, 603, 19719, 755, 487, 259, 4, 160, 200, 1342, 104, 912, 19578, 119, 104, 19748, 20011, 19556, 323, 1420, 19587, 40, 19465, 15012, 755, 19977, 19927, 12052, 276, 124, 12053, 104, 259, 4, 19480, 89, 245, 1342, 104, 911, 1405, 91, 728, 798, 152, 19472, 4, 89, 245, 1789, 119, 19466, 3930, 17, 768, 136, 1900, 139, 545, 19782, 19951, 19561, 19680, 19538, 4, 19469, 1056, 19564, 41, 392, 718, 5, 41, 503, 9, 3, 2])
-    print(text, len(text))
+    # text = tokenizer.convert_ids_to_tokens([1, 17416, 19509, 1397, 19574, 31, 58, 72, 245, 119, 104, 19676, 505, 1079, 19619, 3930, 17, 130, 1397, 19676, 436, 131, 4552, 9490, 19505, 250, 612, 338, 2763, 12456, 171, 612, 17555, 19660, 992, 204, 19748, 20011, 140, 38, 8, 19588, 826, 3586, 28, 517, 250, 612, 196, 171, 612, 19479, 603, 19719, 755, 487, 259, 4, 160, 200, 1342, 104, 912, 19578, 119, 104, 19748, 20011, 19556, 323, 1420, 19587, 40, 19465, 15012, 755, 19977, 19927, 12052, 276, 124, 12053, 104, 259, 4, 19480, 89, 245, 1342, 104, 911, 1405, 91, 728, 798, 152, 19472, 4, 89, 245, 1789, 119, 19466, 3930, 17, 768, 136, 1900, 139, 545, 19782, 19951, 19561, 19680, 19538, 4, 19469, 1056, 19564, 41, 392, 718, 5, 41, 503, 9, 3, 2])
+    # text2 = tokenizer.convert_ids_to_tokens([1, 57, 68, 171, 612, 19508, 19583, 1046, 250, 612, 102, 17416, 15226, 4719, 30, 8296, 183, 4, 107, 67, 119, 19466, 2750, 17, 515, 136, 1266, 139, 200, 268, 334, 19927, 139, 735, 4, 588, 17, 399, 317, 28564, 19506, 559, 46, 217, 399, 12043, 250, 612, 63, 19793, 46, 19748, 12243, 381, 12043, 19748, 20011, 19584, 29, 78, 599, 19714, 13382, 64, 59, 137, 77, 190, 171, 612, 19708, 19722, 530, 59, 46, 284, 4, 19793, 190, 250, 612, 19708, 19722, 12043, 89, 1079, 19619, 131, 208, 17509, 116, 1068, 16687, 40, 12043, 104, 19496, 107, 38, 190, 3892, 6, 163, 716, 58, 76, 588, 19676, 505, 19748, 20011, 46, 19748, 19683, 798, 19546, 19469, 1056, 19564, 41, 392, 718, 5, 41, 503, 9, 3, 2])
+    # text3 = tokenizer.convert_ids_to_tokens([1, 17416, 19509, 1397, 19574, 31, 58, 72, 245, 119, 104, 19676, 505, 1079, 19619, 3930, 17, 130, 1397, 19676, 436, 131, 4552, 9490, 19505, 250, 612, 338, 2763, 12456, 171, 612, 17555, 19660, 992, 204, 19748, 20011, 140, 38, 8, 19588, 826, 3586, 28, 517, 250, 612, 196, 171, 612, 19479, 603, 19719, 755, 487, 259, 4, 160, 200, 1342, 104, 912, 19578, 119, 104, 19748, 20011, 19556, 323, 1420, 19587, 40, 19465, 15012, 755, 19977, 19927, 12052, 276, 124, 12053, 104, 259, 4, 19480, 89, 245, 1342, 104, 911, 1405, 91, 728, 798, 152, 19472, 4, 89, 245, 1789, 119, 19466, 3930, 17, 768, 136, 1900, 19469, 1056, 19564, 41, 392, 718, 5, 41, 503, 9, 3, 2])
+    # text4 = tokenizer.convert_ids_to_tokens([1, 139, 545, 19782, 19951, 19561, 19680, 19538, 4, 1079, 19619, 142, 86, 74, 57, 68, 171, 612, 19508, 19583, 1046, 250, 612, 102, 17416, 15226, 4719, 30, 8296, 183, 4, 107, 67, 119, 19466, 2750, 17, 515, 136, 1266, 139, 200, 268, 334, 19927, 139, 735, 4, 588, 17, 399, 317, 28564, 19506, 559, 46, 217, 399, 12043, 250, 612, 63, 19793, 46, 19748, 12243, 381, 12043, 19748, 20011, 19584, 29, 78, 599, 19714, 13382, 64, 59, 137, 77, 190, 171, 612, 19708, 19722, 530, 59, 46, 284, 4, 19793, 190, 250, 612, 19708, 19722, 12043, 89, 1079, 19619, 131, 208, 17509, 116, 1068, 16687, 40, 12043, 19469, 1056, 19564, 41, 392, 718, 5, 41, 503, 9, 3, 2])
+    
+    # print(text, len(text), text2, text3, text4)
+
 
     # Define the template for preprocess and the verbalizer for postprocess.
     template = AutoTemplate.create_from(
@@ -600,13 +1028,12 @@ def main():
 
     # Load the few-shot datasets.
     train_ds, dev_ds, test_ds = load_local_dataset(
-        data_path=data_args.data_dir, splits=["train", "dev", "test"], label_list=verbalizer.labels_to_ids
+        data_path=data_args.data_dir, splits=["train", "dev", "test"], label_list=verbalizer.labels_to_ids, chunk_len=training_args.max_seq_length, overlap_length=20, \
+        prompt=data_args.prompt, other_tokens_length=3
     )
 
-
-
-    # print(isinstance(train_ds, paddle.io.IterableDataset))
-    # # print(is_train_ds.__getitem__(0))
+    # print(train_ds.new_data)
+    # print(type(train_ds), train_ds.data, type(train_ds.__getitem__(0)))
     # return
 
     # Define the criterion.
@@ -614,7 +1041,7 @@ def main():
 
     # Initialize the prompt model with the above variables.
     prompt_model = PromptModelForSequenceClassification(
-        model, template, verbalizer, freeze_plm=training_args.freeze_plm, freeze_dropout=training_args.freeze_dropout
+        model, template, verbalizer, freeze_plm=training_args.freeze_plm, freeze_dropout=training_args.freeze_dropout, 
     )
 
     # Define the metric function.
@@ -628,15 +1055,12 @@ def main():
     # Deine the early-stopping callback.
     callbacks = [EarlyStoppingCallback(early_stopping_patience=4, early_stopping_threshold=0.0)]
 
-
-    # print(training_args)
-
-    # return 
     # Initialize the trainer.
     trainer = PromptTrainer(
         model=prompt_model,
         tokenizer=tokenizer,
         args=training_args,
+        data_collator=PromptDataCollatorWithPadding(tokenizer, padding=True, return_tensors="pd"),
         criterion=criterion,
         train_dataset=train_ds,
         eval_dataset=dev_ds,
