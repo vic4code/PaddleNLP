@@ -14,7 +14,7 @@
 
 import numpy as np
 from paddle.metric import Metric
-from sklearn.metrics import classification_report, f1_score
+from sklearn.metrics import classification_report, f1_score, accuracy_score, precision_score, recall_score
 
 from paddlenlp.utils.log import logger
 
@@ -36,6 +36,37 @@ class MetricReport(Metric):
         """
         self.y_prob = None
         self.y_true = None
+
+    def accuracy_score(self, y_prob):
+        """
+        Compute precision score
+        """
+        threshold = 0.5
+        self.y_pred = y_prob > threshold
+        accuracy = accuracy_score(y_pred=self.y_pred, y_true=self.y_true)
+        
+        return accuracy
+    
+    def precision_score(self, y_prob):
+        """
+        Compute precision score
+        """
+        threshold = 0.5
+        self.y_pred = y_prob > threshold
+        precision = precision_score(y_pred=self.y_pred, y_true=self.y_true, average="micro")
+
+        return precision
+    
+    def recall_score(self, y_prob):
+        """
+        Compute recall score
+        """
+        threshold = 0.5
+        self.y_pred = y_prob > threshold
+        recall = recall_score(y_pred=self.y_pred, y_true=self.y_true, average="micro")
+       
+        return recall
+
 
     def f1_score(self, y_prob):
         """
@@ -65,7 +96,11 @@ class MetricReport(Metric):
         Returns micro f1 score and macro f1 score
         """
         micro_f1_score, macro_f1_score = self.f1_score(y_prob=self.y_prob)
-        return micro_f1_score, macro_f1_score
+        accuracy = self.accuracy_score(y_prob=self.y_prob)
+        precision = self.precision_score(y_prob=self.y_prob)
+        recall = self.recall_score(y_prob=self.y_prob)
+
+        return micro_f1_score, macro_f1_score, accuracy, precision, recall
 
     def report(self):
         """
