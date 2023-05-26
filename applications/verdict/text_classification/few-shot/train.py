@@ -58,7 +58,7 @@ class ModelArguments:
 
 class PromptDataCollatorWithPadding(PromptDataCollatorWithPadding):
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
-        self.default_model_input_names : List = (
+        self.default_model_input_names: List = (
             "input_ids",
             "token_type_ids",
             "special_tokens_mask",
@@ -67,7 +67,7 @@ class PromptDataCollatorWithPadding(PromptDataCollatorWithPadding):
             "id",
             "nth_chunk"
         )
-        
+
         batch = {}
         for key in features[0]:
             if key in self.default_model_input_names:
@@ -116,9 +116,6 @@ class PromptDataCollatorWithPadding(PromptDataCollatorWithPadding):
                     continue
                 batch[key] = self._convert_to_tensors(values)
         
-        # print(batch)
-        # breakpoint()
-
         return batch
 
 
@@ -143,39 +140,6 @@ class PromptTrainer(PromptTrainer):
             rank=self.args.dataset_rank,
             drop_last=self.args.dataloader_drop_last,
         )
-    
-
-    # def _get_eval_sampler(self, eval_dataset: Dataset):
-    #     if self.args.world_size <= 1:
-    #         return paddle.io.BatchSampler(
-    #             eval_dataset,
-    #             batch_size=self.args.per_device_eval_batch_size,
-    #             shuffle=False,
-    #             drop_last=False,
-    #         )
-    #     else:
-    #         drop_last = False
-    #         if self.args.pipeline_parallel_degree > 1:
-    #             drop_last = True
-    #             logger.warning(
-    #                 "In parallel mode, the bacth_size is strictly checked. set DistributedBatchSampler drop_last=True."
-    #             )
-
-    #         return DistributedBatchSampler(
-    #             eval_dataset,
-    #             num_replicas=self.args.dataset_world_size,
-    #             rank=self.args.dataset_rank,
-    #             batch_size=self.args.per_device_eval_batch_size,
-    #             shuffle=False,
-    #             drop_last=drop_last,
-    #         )
-        
-    
-    # def get_test_dataloader(self, test_dataset) -> DataLoader :
-    #     self.args.dataloader_drop_last = False
-    #     # self.data_collator = PromptDataCollatorWithPadding(self.tokenizer, padding=True, return_tensors="pd")
-    #     test_dataset = self._map_dataset(test_dataset)
-    #     return super(PromptTrainer, self).get_test_dataloader(test_dataset)
     
 
     def get_test_dataloader(self, test_dataset: Dataset) -> DataLoader:
@@ -214,12 +178,6 @@ class PromptTrainer(PromptTrainer):
 
         test_sampler = self._get_eval_sampler(test_dataset)
 
-        print('ia here')
-        print(test_sampler.__dict__)
-        print(self.data_collator)
-        print(self.args.dataloader_drop_last)
-        breakpoint()
-
         # We use the same batch_size as for eval.
         return DataLoader(
             test_dataset,
@@ -241,7 +199,7 @@ class PromptTrainer(PromptTrainer):
         return loss, logits
 
 
-    def compute_loss(self, inputs, logits, return_outputs=True):
+    def compute_loss(self, inputs, logits, return_outputs=True, is_train=False):
         """
         Compute the total loss for every batch.
         """
@@ -251,6 +209,16 @@ class PromptTrainer(PromptTrainer):
         
         labels = inputs["labels"][-1, :].unsqueeze(axis=0)
         loss = self.criterion(logits, labels)
+
+        if is_train:
+            logger.info(
+                f"training_loss: {loss.item()}."
+            )
+        
+        else:
+            logger.info(
+                f"eval_loss: {loss.item()}."
+            )
 
         return loss
 
@@ -272,8 +240,6 @@ class PromptTrainer(PromptTrainer):
                 A list of keys in the output of your model (if it is a dictionary) that should be ignored when
                 gathering predictions for evaluation during the training.
         """
-
-        # print("length of train_dataset", self.train_dataset.data.__len__(), self.train_dataset.__getitem__(0), len(self.train_dataset.__getitem__(0)['input_ids']))
 
         args = self.args
         self.is_in_train = True
@@ -314,7 +280,6 @@ class PromptTrainer(PromptTrainer):
             del state_dict
 
         train_dataloader = self.get_train_dataloader()
-        # print(dir(train_dataloader))
 
         total_train_batch_size = args.train_batch_size * args.gradient_accumulation_steps * args.dataset_world_size
         len_dataloader = None
@@ -541,7 +506,7 @@ class PromptTrainer(PromptTrainer):
                 inputs = self._prepare_inputs(inputs)
                 # print('current id:', inputs['id'], 'current nth chunks', inputs['nth_chunk'], 'marker_id', id_marker)
 
-                if False not in (inputs['id'] == id_marker):
+                if len(inputs['id']) != len(id_marker) or False not in (inputs['id'] == id_marker):
 
                     # breakpoint()
                     tmp_batch = inputs
@@ -560,7 +525,7 @@ class PromptTrainer(PromptTrainer):
                         with self.autocast_smart_context_manager():
                             accum_logits = paddle.nn.functional.sigmoid(accum_logits)
                             # print('last batch:', accum_logits)
-                            loss = self.compute_loss(inputs, logits=paddle.nn.functional.sigmoid(accum_logits))
+                            loss = self.compute_loss(inputs, logits=paddle.nn.functional.sigmoid(accum_logits), is_train=model.training)
 
                             if self.args.gradient_accumulation_steps > 1:
                                 loss = loss / self.args.gradient_accumulation_steps
@@ -584,7 +549,7 @@ class PromptTrainer(PromptTrainer):
                     # print('calculate loss by verdict after sigmoid:', accum_logits)
 
                     with self.autocast_smart_context_manager():
-                        loss = self.compute_loss(inputs, logits=accum_logits)
+                        loss = self.compute_loss(inputs, logits=accum_logits, is_train=model.training)
 
                     if self.args.gradient_accumulation_steps > 1:
                         loss = loss / self.args.gradient_accumulation_steps
@@ -597,9 +562,6 @@ class PromptTrainer(PromptTrainer):
                     accum_logits = 0
 
                 tr_loss += loss.detach()
-                logger.info(
-                    f"training_loss: {tr_loss.item()}."
-                )
 
                 if (step + 1) % args.gradient_accumulation_steps == 0 or (
                     # last step in epoch but step is always smaller than gradient_accumulation_steps
@@ -898,9 +860,6 @@ class PromptTrainer(PromptTrainer):
                     batch_size = observed_batch_size
 
             # Prediction step
-            # loss, logits, labels = self.prediction_step(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
-
-            # print('eval', inputs, inputs['id'], id_marker)
             if len(inputs['id']) != len(id_marker) or False not in (inputs['id'] == id_marker):
                 tmp_batch = inputs
 
@@ -936,7 +895,7 @@ class PromptTrainer(PromptTrainer):
                     if step == len(dataloader) - 1 or len(dataloader) == 1:
                         with self.autocast_smart_context_manager():
                             accum_logits = paddle.nn.functional.sigmoid(accum_logits)
-                            loss = self.compute_loss(inputs, logits=paddle.nn.functional.sigmoid(accum_logits))
+                            loss = self.compute_loss(inputs, logits=paddle.nn.functional.sigmoid(accum_logits), is_train=model.training)
 
                         loss = loss.mean().detach()
                     logits = accum_logits
@@ -948,7 +907,7 @@ class PromptTrainer(PromptTrainer):
                 accum_logits = paddle.nn.functional.sigmoid(accum_logits)
 
                 with self.autocast_smart_context_manager():
-                    loss = self.compute_loss(inputs, logits=accum_logits)
+                    loss = self.compute_loss(inputs, logits=accum_logits, is_train=model.training)
 
                 logits = accum_logits
                 accum_logits = 0
@@ -1075,15 +1034,7 @@ class PromptTrainer(PromptTrainer):
         """
         # memory metrics - must set up as early as possible
         self._memory_tracker.start()
-
-        # Do tokenization idefined in template
-        # test_dataset = self._map_dataset(test_dataset)
         test_dataloader = self.get_test_dataloader(test_dataset)
-        # test_dataloader = self.get_eval_dataloader(test_dataset)
-        # get_eval_dataloader
-        print('test_dataloader', next(iter(test_dataloader)))
-        breakpoint()
-        
         start_time = time.time()
 
         eval_loop = self.evaluation_loop
@@ -1119,10 +1070,6 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
 
     # text = tokenizer.convert_ids_to_tokens([1, 17416, 19509, 1397, 19574, 31, 58, 72, 245, 119, 104, 19676, 505, 1079, 19619, 3930, 17, 130, 1397, 19676, 436, 131, 4552, 9490, 19505, 250, 612, 338, 2763, 12456, 171, 612, 17555, 19660, 992, 204, 19748, 20011, 140, 38, 8, 19588, 826, 3586, 28, 517, 250, 612, 196, 171, 612, 19479, 603, 19719, 755, 487, 259, 4, 160, 200, 1342, 104, 912, 19578, 119, 104, 19748, 20011, 19556, 323, 1420, 19587, 40, 19465, 15012, 755, 19977, 19927, 12052, 276, 124, 12053, 104, 259, 4, 19480, 89, 245, 1342, 104, 911, 1405, 91, 728, 798, 152, 19472, 4, 89, 245, 1789, 119, 19466, 3930, 17, 768, 136, 1900, 139, 545, 19782, 19951, 19561, 19680, 19538, 4, 19469, 1056, 19564, 41, 392, 718, 5, 41, 503, 9, 3, 2])
-    # text2 = tokenizer.convert_ids_to_tokens([1, 57, 68, 171, 612, 19508, 19583, 1046, 250, 612, 102, 17416, 15226, 4719, 30, 8296, 183, 4, 107, 67, 119, 19466, 2750, 17, 515, 136, 1266, 139, 200, 268, 334, 19927, 139, 735, 4, 588, 17, 399, 317, 28564, 19506, 559, 46, 217, 399, 12043, 250, 612, 63, 19793, 46, 19748, 12243, 381, 12043, 19748, 20011, 19584, 29, 78, 599, 19714, 13382, 64, 59, 137, 77, 190, 171, 612, 19708, 19722, 530, 59, 46, 284, 4, 19793, 190, 250, 612, 19708, 19722, 12043, 89, 1079, 19619, 131, 208, 17509, 116, 1068, 16687, 40, 12043, 104, 19496, 107, 38, 190, 3892, 6, 163, 716, 58, 76, 588, 19676, 505, 19748, 20011, 46, 19748, 19683, 798, 19546, 19469, 1056, 19564, 41, 392, 718, 5, 41, 503, 9, 3, 2])
-    # text3 = tokenizer.convert_ids_to_tokens([1, 17416, 19509, 1397, 19574, 31, 58, 72, 245, 119, 104, 19676, 505, 1079, 19619, 3930, 17, 130, 1397, 19676, 436, 131, 4552, 9490, 19505, 250, 612, 338, 2763, 12456, 171, 612, 17555, 19660, 992, 204, 19748, 20011, 140, 38, 8, 19588, 826, 3586, 28, 517, 250, 612, 196, 171, 612, 19479, 603, 19719, 755, 487, 259, 4, 160, 200, 1342, 104, 912, 19578, 119, 104, 19748, 20011, 19556, 323, 1420, 19587, 40, 19465, 15012, 755, 19977, 19927, 12052, 276, 124, 12053, 104, 259, 4, 19480, 89, 245, 1342, 104, 911, 1405, 91, 728, 798, 152, 19472, 4, 89, 245, 1789, 119, 19466, 3930, 17, 768, 136, 1900, 19469, 1056, 19564, 41, 392, 718, 5, 41, 503, 9, 3, 2])
-    # text4 = tokenizer.convert_ids_to_tokens([1, 139, 545, 19782, 19951, 19561, 19680, 19538, 4, 1079, 19619, 142, 86, 74, 57, 68, 171, 612, 19508, 19583, 1046, 250, 612, 102, 17416, 15226, 4719, 30, 8296, 183, 4, 107, 67, 119, 19466, 2750, 17, 515, 136, 1266, 139, 200, 268, 334, 19927, 139, 735, 4, 588, 17, 399, 317, 28564, 19506, 559, 46, 217, 399, 12043, 250, 612, 63, 19793, 46, 19748, 12243, 381, 12043, 19748, 20011, 19584, 29, 78, 599, 19714, 13382, 64, 59, 137, 77, 190, 171, 612, 19708, 19722, 530, 59, 46, 284, 4, 19793, 190, 250, 612, 19708, 19722, 12043, 89, 1079, 19619, 131, 208, 17509, 116, 1068, 16687, 40, 12043, 19469, 1056, 19564, 41, 392, 718, 5, 41, 503, 9, 3, 2])
-    
     # print(text, len(text), text2, text3, text4)
 
 
@@ -1151,16 +1098,6 @@ def main():
         prompt=data_args.prompt, other_tokens_length=3
     )
 
-    # print(train_ds.__dict__)
-    # print("\n")
-    # print(dev_ds.__dict__)
-    # print("\n")
-    # print(test_ds.__dict__)
-
-    # breakpoint()
-    # print('Is dev equals test', dev_ds.data == test_ds.data)
-    # print(train_ds.new_data)
-    
 
     # Define the criterion.
     criterion = paddle.nn.BCEWithLogitsLoss()
@@ -1181,10 +1118,6 @@ def main():
     # Deine the early-stopping callback.
     callbacks = [EarlyStoppingCallback(early_stopping_patience=4, early_stopping_threshold=0.0)]
 
-
-    # print(PromptDataCollatorWithPadding(tokenizer, padding=True, return_tensors="pd").__dict__)
-    # breakpoint()
-    
     # Initialize the trainer.
     trainer = PromptTrainer(
         model=prompt_model,
@@ -1199,13 +1132,13 @@ def main():
     )
 
     # Training.
-    # if training_args.do_train:
-    #     train_result = trainer.train(resume_from_checkpoint=None)
-    #     metrics = train_result.metrics
-    #     trainer.save_model()
-    #     trainer.log_metrics("train", metrics)
-    #     trainer.save_metrics("train", metrics)
-    #     trainer.save_state()
+    if training_args.do_train:
+        train_result = trainer.train(resume_from_checkpoint=None)
+        metrics = train_result.metrics
+        trainer.save_model()
+        trainer.log_metrics("train", metrics)
+        trainer.save_metrics("train", metrics)
+        trainer.save_state()
 
     # Prediction.
     if training_args.do_predict:
