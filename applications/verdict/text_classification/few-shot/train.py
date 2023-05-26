@@ -409,7 +409,12 @@ class PromptTrainer(PromptTrainer):
                     logger.info(f"Set DistributedBatchSampler consumed_samples to {consumed_samples}")
 
         epoch_iterator = train_dataloader
-        # print([*epoch_iterator][0])
+        first_batch = next(iter(epoch_iterator))
+        # print(epoch_iterator.batch_sampler.sampler.data_source.__dict__)
+        # print(next(iter(epoch_iterator.copy())))
+        # breakpoint()
+
+
         # steps_in_epoch = len(epoch_iterator)
         steps_in_epoch = (
             len(epoch_iterator) if len_dataloader is not None else args.max_steps * args.gradient_accumulation_steps
@@ -445,10 +450,9 @@ class PromptTrainer(PromptTrainer):
             step = -1
             self.control = self.callback_handler.on_epoch_begin(args, self.state, self.control)
 
-            tmp_batch = next(iter(epoch_iterator))
+            tmp_batch = first_batch
             id_marker = tmp_batch['id']
             accum_logits = 0
-            
 
             for step, inputs in enumerate(epoch_iterator):
                 # Skip past any already trained steps if resuming training
@@ -507,7 +511,7 @@ class PromptTrainer(PromptTrainer):
                 inputs = self._prepare_inputs(inputs)
                 # print('current id:', inputs['id'], 'current nth chunks', inputs['nth_chunk'], 'marker_id', id_marker)
 
-                if len(inputs['id']) != len(id_marker) or False not in (inputs['id'] == id_marker):
+                if False not in (inputs['id'] == id_marker):
 
                     # breakpoint()
                     tmp_batch = inputs
