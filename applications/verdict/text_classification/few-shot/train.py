@@ -445,9 +445,10 @@ class PromptTrainer(PromptTrainer):
             step = -1
             self.control = self.callback_handler.on_epoch_begin(args, self.state, self.control)
 
-            id_marker = next(iter(epoch_iterator))['id']
+            tmp_batch = next(iter(epoch_iterator))
+            id_marker = tmp_batch['id']
             accum_logits = 0
-            tmp_batch = None
+            
 
             for step, inputs in enumerate(epoch_iterator):
                 # Skip past any already trained steps if resuming training
