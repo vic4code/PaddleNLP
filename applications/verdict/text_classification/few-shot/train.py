@@ -410,10 +410,6 @@ class PromptTrainer(PromptTrainer):
 
         epoch_iterator = train_dataloader
         first_batch = next(iter(epoch_iterator))
-        # print(epoch_iterator.batch_sampler.sampler.data_source.__dict__)
-        # print(next(iter(epoch_iterator.copy())))
-        # breakpoint()
-
 
         # steps_in_epoch = len(epoch_iterator)
         steps_in_epoch = (
@@ -453,6 +449,11 @@ class PromptTrainer(PromptTrainer):
             tmp_batch = first_batch
             id_marker = tmp_batch['id']
             accum_logits = 0
+
+            prev_batch = first_batch
+            prev_batch_id = prev_batch['id']
+            accum_logits = 0
+            loss = None
 
             for step, inputs in enumerate(epoch_iterator):
                 # Skip past any already trained steps if resuming training
@@ -509,52 +510,19 @@ class PromptTrainer(PromptTrainer):
 
                 model.train()
                 inputs = self._prepare_inputs(inputs)
+                current_batch_id = inputs['id']
                 # print('current id:', inputs['id'], 'current nth chunks', inputs['nth_chunk'], 'marker_id', id_marker)
 
-                if False not in (inputs['id'] == id_marker):
+                # print('prev_batch_id', prev_batch_id)
+                # print('current_batch_id', current_batch_id)
 
-                    # breakpoint()
-                    tmp_batch = inputs
-                    # breakpoint()
+                if (current_batch_id != prev_batch_id).any() or step == len(epoch_iterator) - 1 or len(epoch_iterator) == 1:
+                    # Batches have different IDs, calculate loss for the accumulated logits
 
-                    if is_no_sync:
-                        # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.
-                        with model.no_sync():
-                            _, logits = self.compute_forward(model, inputs)
-                    else:
-                        _, logits = self.compute_forward(model, inputs)
-
-                    accum_logits = accum_logits + logits.sum(axis=0, keepdim=True)
-                    
-                    if step == len(epoch_iterator) - 1 or len(epoch_iterator) == 1:
-                        with self.autocast_smart_context_manager():
-                            accum_logits = paddle.nn.functional.sigmoid(accum_logits)
-                            # print('last batch:', accum_logits)
-                            loss = self.compute_loss(inputs, logits=paddle.nn.functional.sigmoid(accum_logits), is_train=model.training)
-
-                            if self.args.gradient_accumulation_steps > 1:
-                                loss = loss / self.args.gradient_accumulation_steps
-
-                            if self.do_grad_scaling:
-                                self.scaler.scale(loss).backward()
-                            else:
-                                loss.backward()
-                    continue
-        
-                else:
-                    # Update marker
-                    # print('current', inputs['id'])
-                    id_marker = paddle.repeat_interleave(inputs['id'][-1], self.args.per_device_train_batch_size)
-                    inputs = inputs if step == len(epoch_iterator) - 1 else tmp_batch
-                    del(tmp_batch)
-
-                    # print('calculate loss by verdict before sigmoid:', accum_logits)
-                    # print('current id:', inputs['id'], 'marker_id', id_marker)
                     accum_logits = paddle.nn.functional.sigmoid(accum_logits)
-                    # print('calculate loss by verdict after sigmoid:', accum_logits)
 
                     with self.autocast_smart_context_manager():
-                        loss = self.compute_loss(inputs, logits=accum_logits, is_train=model.training)
+                        loss = self.compute_loss(prev_batch, logits=accum_logits, is_train=model.training)
 
                     if self.args.gradient_accumulation_steps > 1:
                         loss = loss / self.args.gradient_accumulation_steps
@@ -563,8 +531,23 @@ class PromptTrainer(PromptTrainer):
                         self.scaler.scale(loss).backward()
                     else:
                         loss.backward()
-                    
+
+                    # Reset accumulators
                     accum_logits = 0
+                    prev_batch = inputs
+                    prev_batch_id = paddle.repeat_interleave(current_batch_id[-1], self.args.per_device_train_batch_size)
+
+                else:
+                    if is_no_sync:
+                        # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.
+                        with model.no_sync():
+                            _, logits = self.compute_forward(model, inputs)
+                    else:
+                        _, logits = self.compute_forward(model, inputs)
+
+                    accum_logits = accum_logits + logits.sum(axis=0, keepdim=True)
+
+                    continue
 
                 tr_loss += loss.detach()
 
