@@ -193,8 +193,7 @@ class PromptTrainer(PromptTrainer):
         """
 
         # model outputs depend on the args
-        input_dict = inputs.copy()
-        loss, logits = model(**input_dict)
+        loss, logits = model(**inputs)
     
         return loss, logits
 
@@ -436,7 +435,7 @@ class PromptTrainer(PromptTrainer):
             from .plugins.npu_plugin import npu_accelerate_plugin
 
             npu_accelerate_plugin(self.optimizer)
-
+    
         for epoch in range(epochs_trained, num_train_epochs):
             if isinstance(train_dataloader, paddle.io.DataLoader) and isinstance(
                 train_dataloader.batch_sampler, DistributedBatchSampler
@@ -450,7 +449,7 @@ class PromptTrainer(PromptTrainer):
             prev_batch_id = prev_batch['id']
             accum_logits = paddle.to_tensor(0.0)
             loss = None
-
+            
             for step, inputs in enumerate(epoch_iterator):
                 # Skip past any already trained steps if resuming training
                 # for paddlenlp.utils.batch_sampler.DistributedBatchSampler
@@ -631,6 +630,9 @@ class PromptTrainer(PromptTrainer):
 
             if self.control.should_training_stop:
                 break
+
+            del(prev_batch)
+            del(accum_logits)
 
         if args.past_index and hasattr(self, "_past"):
             # Clean the state at the end of training
@@ -828,9 +830,11 @@ class PromptTrainer(PromptTrainer):
         observed_num_examples = 0
         # Main evaluation loop
         losses = []
-        tmp_batch = None
-        id_marker = next(iter(dataloader))['id']
-        accum_logits = 0
+        # tmp_batch = None
+        first_batch = next(iter(dataloader))
+        prev_batch = first_batch
+        prev_batch_id = prev_batch['id']
+        accum_logits = paddle.to_tensor(0.0)
 
         for step, inputs in enumerate(dataloader):
             # Update the observed num examples
@@ -841,10 +845,25 @@ class PromptTrainer(PromptTrainer):
                 if batch_size is None:
                     batch_size = observed_batch_size
 
-            # Prediction step
-            if len(inputs['id']) != len(id_marker) or False not in (inputs['id'] == id_marker):
-                tmp_batch = inputs
+            current_batch_id = inputs['id']
+            
+            if (current_batch_id != prev_batch_id).any() or step == len(dataloader) - 1 or len(dataloader) == 1:
+                # Batches have different IDs, calculate loss for the accumulated logits
 
+                accum_logits = paddle.nn.functional.sigmoid(accum_logits)
+
+                with self.autocast_smart_context_manager():
+                    loss = self.compute_loss(inputs, logits=accum_logits, is_train=model.training)
+
+                loss = loss.mean().detach()
+                logits = accum_logits
+
+                # Reset accumulators
+                accum_logits = paddle.to_tensor(0.0)
+                prev_batch = inputs
+                prev_batch_id = paddle.repeat_interleave(current_batch_id[-1], self.args.per_device_train_batch_size)
+
+            else:
                 if self.args.pipeline_parallel_degree > 1:
                 # hack for pipeline mode
                     return self.prediction_pipeline_step(model, inputs, prediction_loss_only, ignore_keys)
@@ -870,31 +889,10 @@ class PromptTrainer(PromptTrainer):
                     if has_labels:
                         with self.autocast_smart_context_manager():
                             _, logits = self.compute_forward(model, inputs)
-                            accum_logits = accum_logits + logits.sum(axis=0, keepdim=True)
+                            accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
                             continue
                     
-                    # Calculate accum logits
-                    if step == len(dataloader) - 1 or len(dataloader) == 1:
-                        with self.autocast_smart_context_manager():
-                            accum_logits = paddle.nn.functional.sigmoid(accum_logits)
-                            loss = self.compute_loss(inputs, logits=paddle.nn.functional.sigmoid(accum_logits), is_train=model.training)
-
-                        loss = loss.mean().detach()
-                    logits = accum_logits
-                
-            else:
-                # Update marker
-                id_marker = paddle.repeat_interleave(inputs['id'][-1], self.args.per_device_train_batch_size)
-                inputs = inputs if step == len(dataloader) - 1 else tmp_batch
-                accum_logits = paddle.nn.functional.sigmoid(accum_logits)
-
-                with self.autocast_smart_context_manager():
-                    loss = self.compute_loss(inputs, logits=accum_logits, is_train=model.training)
-
-                logits = accum_logits
-                accum_logits = 0
-
-            labels = inputs['labels'][-1].unsqueeze(0)
+            labels = inputs.pop("labels")[-1].unsqueeze(0)
 
             # Update containers on host
             if loss is not None:
