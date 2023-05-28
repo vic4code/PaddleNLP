@@ -446,13 +446,9 @@ class PromptTrainer(PromptTrainer):
             step = -1
             self.control = self.callback_handler.on_epoch_begin(args, self.state, self.control)
 
-            tmp_batch = first_batch
-            id_marker = tmp_batch['id']
-            accum_logits = 0
-
             prev_batch = first_batch
             prev_batch_id = prev_batch['id']
-            accum_logits = 0
+            accum_logits = paddle.to_tensor(0.0)
             loss = None
 
             for step, inputs in enumerate(epoch_iterator):
@@ -511,11 +507,7 @@ class PromptTrainer(PromptTrainer):
                 model.train()
                 inputs = self._prepare_inputs(inputs)
                 current_batch_id = inputs['id']
-                # print('current id:', inputs['id'], 'current nth chunks', inputs['nth_chunk'], 'marker_id', id_marker)
-
-                # print('prev_batch_id', prev_batch_id)
-                # print('current_batch_id', current_batch_id)
-
+                
                 if (current_batch_id != prev_batch_id).any() or step == len(epoch_iterator) - 1 or len(epoch_iterator) == 1:
                     # Batches have different IDs, calculate loss for the accumulated logits
 
@@ -531,9 +523,12 @@ class PromptTrainer(PromptTrainer):
                         self.scaler.scale(loss).backward()
                     else:
                         loss.backward()
+                    
+                    # self.optimizer.step()
+                    # self.optimizer.clear_grad()
 
                     # Reset accumulators
-                    accum_logits = 0
+                    accum_logits = paddle.to_tensor(0.0)
                     prev_batch = inputs
                     prev_batch_id = paddle.repeat_interleave(current_batch_id[-1], self.args.per_device_train_batch_size)
 
@@ -545,8 +540,7 @@ class PromptTrainer(PromptTrainer):
                     else:
                         _, logits = self.compute_forward(model, inputs)
 
-                    accum_logits = accum_logits + logits.sum(axis=0, keepdim=True)
-
+                    accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
                     continue
 
                 tr_loss += loss.detach()
