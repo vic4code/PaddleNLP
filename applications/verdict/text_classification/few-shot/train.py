@@ -507,7 +507,46 @@ class PromptTrainer(PromptTrainer):
                 inputs = self._prepare_inputs(inputs)
                 current_batch_id = inputs['id']
                 
-                if (current_batch_id != prev_batch_id).any() or step == len(epoch_iterator) - 1 or len(epoch_iterator) == 1:
+                # Only one batch
+                if len(epoch_iterator) == 1:
+                    if len(inputs.unique()) == 1:    
+                        if is_no_sync:
+                        # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.
+                            with model.no_sync():
+                                _, logits = self.compute_forward(model, inputs)
+                        else:
+                            _, logits = self.compute_forward(model, inputs)
+                    
+                        loss = self.compute_loss(inputs, logits=logits, is_train=model.training)
+                        if self.args.gradient_accumulation_steps > 1:
+                            loss = loss / self.args.gradient_accumulation_steps
+
+                        if self.do_grad_scaling:
+                            self.scaler.scale(loss).backward()
+                        else:
+                            loss.backward()
+                    else:
+                        raise ValueError("Texts must be in the same verdict. ")
+
+                # Handle the last batch
+                elif step == len(epoch_iterator) - 1:
+                    with self.autocast_smart_context_manager():
+                        _, logits = self.compute_forward(model, inputs)
+                        accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
+                        accum_logits = paddle.nn.functional.sigmoid(accum_logits)
+                        loss = self.compute_loss(inputs, logits=accum_logits, is_train=model.training)
+                        logits = accum_logits
+
+                    if self.args.gradient_accumulation_steps > 1:
+                        loss = loss / self.args.gradient_accumulation_steps
+
+                    if self.do_grad_scaling:
+                        self.scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
+
+                # Batches have different IDs, calculate loss for the accumulated logits
+                elif (current_batch_id != prev_batch_id).any():
                     # Batches have different IDs, calculate loss for the accumulated logits
 
                     accum_logits = paddle.nn.functional.sigmoid(accum_logits)
@@ -522,9 +561,6 @@ class PromptTrainer(PromptTrainer):
                         self.scaler.scale(loss).backward()
                     else:
                         loss.backward()
-                    
-                    # self.optimizer.step()
-                    # self.optimizer.clear_grad()
 
                     # Reset accumulators
                     accum_logits = paddle.to_tensor(0.0)
@@ -539,7 +575,9 @@ class PromptTrainer(PromptTrainer):
                     else:
                         _, logits = self.compute_forward(model, inputs)
 
+                    # print(logits)
                     accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
+                    
                     continue
 
                 tr_loss += loss.detach()
@@ -846,30 +884,58 @@ class PromptTrainer(PromptTrainer):
                     batch_size = observed_batch_size
 
             current_batch_id = inputs['id']
-            
-            if (current_batch_id != prev_batch_id).any() or step == len(dataloader) - 1 or len(dataloader) == 1:
-                # Batches have different IDs, calculate loss for the accumulated logits
+            inputs = self._prepare_inputs(inputs)
 
+            # Only one batch
+            if len(dataloader) == 1:
+                if len(inputs.unique()) == 1:
+                    with paddle.no_grad():
+                        # Model forward
+                        if has_labels:
+                            with self.autocast_smart_context_manager():
+                                _, logits = self.compute_forward(model, inputs)
+                
+                    loss = self.compute_loss(inputs, logits=logits, is_train=model.training)
+                    labels = inputs.pop("labels")[-1].unsqueeze(0) 
+
+                else:
+                    raise ValueError("Texts must be in the same verdict. ")
+
+            # Handle the last batch
+            elif step == len(dataloader) - 1:
+                with self.autocast_smart_context_manager():
+                    _, logits = self.compute_forward(model, inputs)
+                    accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
+                    accum_logits = paddle.nn.functional.sigmoid(accum_logits)
+                    loss = self.compute_loss(inputs, logits=accum_logits, is_train=model.training)
+                    logits = accum_logits
+                    labels = inputs.pop("labels")[-1].unsqueeze(0) 
+
+            # Batches have different IDs, calculate loss for the accumulated logits
+            elif (current_batch_id != prev_batch_id).any():
+        
                 accum_logits = paddle.nn.functional.sigmoid(accum_logits)
 
                 with self.autocast_smart_context_manager():
-                    loss = self.compute_loss(inputs, logits=accum_logits, is_train=model.training)
+                    loss = self.compute_loss(prev_batch, logits=accum_logits, is_train=model.training)
 
                 loss = loss.mean().detach()
                 logits = accum_logits
+                labels = prev_batch.pop("labels")[-1].unsqueeze(0) 
 
                 # Reset accumulators
                 accum_logits = paddle.to_tensor(0.0)
                 prev_batch = inputs
                 prev_batch_id = paddle.repeat_interleave(current_batch_id[-1], self.args.per_device_train_batch_size)
 
+            # Accumulate logits
             else:
                 if self.args.pipeline_parallel_degree > 1:
                 # hack for pipeline mode
                     return self.prediction_pipeline_step(model, inputs, prediction_loss_only, ignore_keys)
 
                 has_labels = all(inputs.get(k) is not None for k in self.label_names)
-                inputs = self._prepare_inputs(inputs)
+                
                 if ignore_keys is None:
                     if hasattr(self.model, "config"):
                         ignore_keys = getattr(self.model.config, "keys_to_ignore_at_inference", [])
@@ -890,10 +956,9 @@ class PromptTrainer(PromptTrainer):
                         with self.autocast_smart_context_manager():
                             _, logits = self.compute_forward(model, inputs)
                             accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
-                            continue
+                
+                continue
                     
-            labels = inputs.pop("labels")[-1].unsqueeze(0)
-
             # Update containers on host
             if loss is not None:
                 # losses = self._nested_gather(loss.repeat(batch_size))
