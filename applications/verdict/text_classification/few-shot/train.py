@@ -508,20 +508,20 @@ class PromptTrainer(PromptTrainer):
                 model.train()
                 inputs = self._prepare_inputs(inputs)
                 
-                if inputs['nth_chunk'][-1] != inputs['num_chunks'][-1]:
-                    if is_no_sync:
-                    # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.
-                        with model.no_sync():
-                            _, logits = self.compute_forward(model, inputs)
-                    else:
+                # Model forward
+                if is_no_sync:
+                # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.
+                    with model.no_sync():
                         _, logits = self.compute_forward(model, inputs)
-
-                    accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
-                    continue
-
                 else:
-                    accum_logits = accum_logits / inputs['num_chunks'][-1]
+                    _, logits = self.compute_forward(model, inputs)
 
+                accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
+                
+                # Compute loss
+                if inputs['nth_chunk'][-1] == inputs['num_chunks'][-1]:
+
+                    accum_logits = accum_logits / inputs['num_chunks'][-1]
                     with self.autocast_smart_context_manager():
                         loss = self.compute_loss(inputs, logits=accum_logits, is_train=model.training)
 
@@ -535,6 +535,9 @@ class PromptTrainer(PromptTrainer):
 
                     # Reset accumulators
                     accum_logits = paddle.to_tensor(0.0)
+                
+                else:
+                    continue
 
                 tr_loss += loss.detach()
 
@@ -834,35 +837,34 @@ class PromptTrainer(PromptTrainer):
                 if batch_size is None:
                     batch_size = observed_batch_size
 
-            if inputs['nth_chunk'][-1] != inputs['num_chunks'][-1]:
+            # Model forward
+            if self.args.pipeline_parallel_degree > 1:
+            # hack for pipeline mode
+                return self.prediction_pipeline_step(model, inputs, prediction_loss_only, ignore_keys)
 
-                if self.args.pipeline_parallel_degree > 1:
-                # hack for pipeline mode
-                    return self.prediction_pipeline_step(model, inputs, prediction_loss_only, ignore_keys)
-
-                has_labels = all(inputs.get(k) is not None for k in self.label_names)
-                
-                if ignore_keys is None:
-                    if hasattr(self.model, "config"):
-                        ignore_keys = getattr(self.model.config, "keys_to_ignore_at_inference", [])
-                    else:
-                        ignore_keys = []
-
-                # labels may be popped when computing the loss (label smoothing for instance) so we grab them first.
-                if has_labels:
-                    labels = nested_detach(tuple(inputs.get(name) for name in self.label_names))
-                    if len(labels) == 1:
-                        labels = labels[0]
+            has_labels = all(inputs.get(k) is not None for k in self.label_names)
+            
+            if ignore_keys is None:
+                if hasattr(self.model, "config"):
+                    ignore_keys = getattr(self.model.config, "keys_to_ignore_at_inference", [])
                 else:
-                    labels = None
+                    ignore_keys = []
 
-                with paddle.no_grad():
-                    with self.autocast_smart_context_manager():
-                        _, logits = self.compute_forward(model, inputs)
-                        accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
-                continue
-
+            # labels may be popped when computing the loss (label smoothing for instance) so we grab them first.
+            if has_labels:
+                labels = nested_detach(tuple(inputs.get(name) for name in self.label_names))
+                if len(labels) == 1:
+                    labels = labels[0]
             else:
+                labels = None
+
+            with paddle.no_grad():
+                with self.autocast_smart_context_manager():
+                    _, logits = self.compute_forward(model, inputs)
+                    accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))                
+
+            # Compute loss
+            if inputs['nth_chunk'][-1] == inputs['num_chunks'][-1]:
                 accum_logits = nested_detach(accum_logits)
                 if isinstance(accum_logits, (list, tuple)) and len(accum_logits) == 1:
                     accum_logits = accum_logits[0]
@@ -879,6 +881,9 @@ class PromptTrainer(PromptTrainer):
 
                 # Reset accumulators
                 accum_logits = paddle.to_tensor(0.0)
+            
+            else:
+                continue
                     
             # Update containers on host
             if loss is not None:

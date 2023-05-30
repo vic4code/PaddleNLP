@@ -721,6 +721,40 @@ class XLNetForQuestionAnsweringOutput(ModelOutput):
     attentions: Optional[Tuple[paddle.Tensor]] = None
 
 
+@dataclass
+class XLNetForMaskedLMOutput(ModelOutput):
+    """
+    Output type of [`XLNetForTokenClassificationOutput`].
+
+    Args:
+        loss (`paddle.Tensor` of shape `(1,)`, *optional*, returned when `labels` is provided) :
+            Classification loss.
+        logits (`paddle.Tensor` of shape `(batch_size, sequence_length, config.num_labels)`):
+            Classification scores (before SoftMax).
+        mems (`List[paddle.Tensor]` of length `config.n_layers`):
+            Contains pre-computed hidden-states. Can be used (see `mems` input) to speed up sequential decoding. The
+            token ids which have their past given to this model should not be passed as `input_ids` as they have
+            already been computed.
+        hidden_states (`tuple(paddle.Tensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `paddle.Tensor` (one for the output of the embeddings + one for the output of each layer) of
+            shape `(batch_size, sequence_length, hidden_size)`.
+
+            Hidden-states of the model at the output of each layer plus the initial embedding outputs.
+        attentions (`tuple(paddle.Tensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `paddle.Tensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`.
+
+            Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
+            heads.
+    """
+
+    loss: Optional[paddle.Tensor] = None
+    logits: paddle.Tensor = None
+    mems: Optional[List[paddle.Tensor]] = None
+    hidden_states: Optional[Tuple[paddle.Tensor]] = None
+    attentions: Optional[Tuple[paddle.Tensor]] = None
+
+
 @register_base_model
 class XLNetModel(XLNetPretrainedModel):
     """
@@ -999,7 +1033,6 @@ class XLNetModel(XLNetPretrainedModel):
         else:
             use_mems = use_mems_eval
 
-        print(input_ids.shape)
         # The original code for XLNet uses shapes [len, bsz] with the batch dimension at the end
         # but we want a unified interface in the library with the batch size on the first dimension
         # so we move here the first dimension (batch) to the end
@@ -2114,9 +2147,10 @@ class XLNetForMaskedLM(XLNetPretrainedModel):
                 else (output[0] if len(output) == 1 else output)
             )
 
-        return MaskedLMOutput(
+        return XLNetForMaskedLMOutput(
             loss=masked_lm_loss,
             logits=prediction_scores,
+            mems=outputs.mems,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )

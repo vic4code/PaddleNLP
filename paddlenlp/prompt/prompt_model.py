@@ -23,6 +23,11 @@ from ..transformers.model_outputs import (
     MultipleChoiceModelOutput,
     SequenceClassifierOutput,
 )
+
+from ..transformers.xlnet.modeling import (
+    XLNetForMaskedLMOutput
+)
+
 from .prompt_utils import signature
 from .template import PrefixTemplate, Template
 from .verbalizer import Verbalizer
@@ -90,7 +95,7 @@ class PromptModelForSequenceClassification(paddle.nn.Layer):
         if "masked_positions" in model_inputs:
             model_inputs.pop("masked_positions")
         model_outputs = self.plm(**model_inputs, return_dict=True)
-        if isinstance(model_outputs, MaskedLMOutput):
+        if isinstance(model_outputs, MaskedLMOutput) or isinstance(model_outputs, XLNetForMaskedLMOutput):
             if self.verbalizer is not None:
                 logits = self.verbalizer.process_outputs(model_outputs.logits, input_dict["masked_positions"])
                 num_labels = len(self.verbalizer.label_words)
@@ -126,6 +131,16 @@ class PromptModelForSequenceClassification(paddle.nn.Layer):
             if isinstance(output, (list, tuple)) and len(output) == 1:
                 output = output[0]
             return output
+        
+        if isinstance(model_outputs, XLNetForMaskedLMOutput):
+            return XLNetForMaskedLMOutput(
+                loss=loss,
+                logits=logits,
+                mems=model_outputs.mems,
+                hidden_states=model_outputs.hidden_states,
+                attentions=model_outputs.attentions,
+        )
+
 
         return SequenceClassifierOutput(
             loss=loss,
