@@ -65,7 +65,8 @@ class PromptDataCollatorWithPadding(PromptDataCollatorWithPadding):
             "offset_mapping",
             "position_ids",
             "id",
-            "nth_chunk"
+            "nth_chunk",
+            "num_chunks"
         )
 
         batch = {}
@@ -408,7 +409,6 @@ class PromptTrainer(PromptTrainer):
                     logger.info(f"Set DistributedBatchSampler consumed_samples to {consumed_samples}")
 
         epoch_iterator = train_dataloader
-        first_batch = next(iter(epoch_iterator))
 
         # steps_in_epoch = len(epoch_iterator)
         steps_in_epoch = (
@@ -445,16 +445,17 @@ class PromptTrainer(PromptTrainer):
             step = -1
             self.control = self.callback_handler.on_epoch_begin(args, self.state, self.control)
 
-            prev_batch = first_batch
-            prev_batch_id = prev_batch['id']
             accum_logits = paddle.to_tensor(0.0)
-            loss = None
+            tr_loss = paddle.to_tensor(0.0)
             
             for step, inputs in enumerate(epoch_iterator):
                 # Skip past any already trained steps if resuming training
                 # for paddlenlp.utils.batch_sampler.DistributedBatchSampler
                 # We use consumed_samples to reset the status
                 
+                # print(inputs)
+                # breakpoint()
+
                 if isinstance(train_dataloader, paddle.io.DataLoader) and isinstance(
                     train_dataloader.batch_sampler, NlpDistributedBatchSampler
                 ):
@@ -505,54 +506,23 @@ class PromptTrainer(PromptTrainer):
 
                 model.train()
                 inputs = self._prepare_inputs(inputs)
-                current_batch_id = inputs['id']
                 
-                # Only one batch
-                if len(epoch_iterator) == 1:
-                    if len(inputs.unique()) == 1:    
-                        if is_no_sync:
-                        # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.
-                            with model.no_sync():
-                                _, logits = self.compute_forward(model, inputs)
-                        else:
+                if inputs['nth_chunk'][-1] != inputs['num_chunks'][-1]:
+                    if is_no_sync:
+                    # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.
+                        with model.no_sync():
                             _, logits = self.compute_forward(model, inputs)
-                    
-                        loss = self.compute_loss(inputs, logits=logits, is_train=model.training)
-                        if self.args.gradient_accumulation_steps > 1:
-                            loss = loss / self.args.gradient_accumulation_steps
-
-                        if self.do_grad_scaling:
-                            self.scaler.scale(loss).backward()
-                        else:
-                            loss.backward()
                     else:
-                        raise ValueError("Texts must be in the same verdict. ")
-
-                # Handle the last batch
-                elif step == len(epoch_iterator) - 1:
-                    with self.autocast_smart_context_manager():
                         _, logits = self.compute_forward(model, inputs)
-                        accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
-                        accum_logits = paddle.nn.functional.sigmoid(accum_logits)
-                        loss = self.compute_loss(inputs, logits=accum_logits, is_train=model.training)
-                        logits = accum_logits
 
-                    if self.args.gradient_accumulation_steps > 1:
-                        loss = loss / self.args.gradient_accumulation_steps
+                    accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
+                    continue
 
-                    if self.do_grad_scaling:
-                        self.scaler.scale(loss).backward()
-                    else:
-                        loss.backward()
-
-                # Batches have different IDs, calculate loss for the accumulated logits
-                elif (current_batch_id != prev_batch_id).any():
-                    # Batches have different IDs, calculate loss for the accumulated logits
-
-                    accum_logits = paddle.nn.functional.sigmoid(accum_logits)
+                else:
+                    accum_logits = accum_logits / inputs['num_chunks'][-1]
 
                     with self.autocast_smart_context_manager():
-                        loss = self.compute_loss(prev_batch, logits=accum_logits, is_train=model.training)
+                        loss = self.compute_loss(inputs, logits=accum_logits, is_train=model.training)
 
                     if self.args.gradient_accumulation_steps > 1:
                         loss = loss / self.args.gradient_accumulation_steps
@@ -564,21 +534,6 @@ class PromptTrainer(PromptTrainer):
 
                     # Reset accumulators
                     accum_logits = paddle.to_tensor(0.0)
-                    prev_batch = inputs
-                    prev_batch_id = paddle.repeat_interleave(current_batch_id[-1], self.args.per_device_train_batch_size)
-
-                else:
-                    if is_no_sync:
-                        # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.
-                        with model.no_sync():
-                            _, logits = self.compute_forward(model, inputs)
-                    else:
-                        _, logits = self.compute_forward(model, inputs)
-
-                    # print(logits)
-                    accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
-                    
-                    continue
 
                 tr_loss += loss.detach()
 
@@ -668,9 +623,6 @@ class PromptTrainer(PromptTrainer):
 
             if self.control.should_training_stop:
                 break
-
-            del(prev_batch)
-            del(accum_logits)
 
         if args.past_index and hasattr(self, "_past"):
             # Clean the state at the end of training
@@ -869,9 +821,6 @@ class PromptTrainer(PromptTrainer):
         # Main evaluation loop
         losses = []
         # tmp_batch = None
-        first_batch = next(iter(dataloader))
-        prev_batch = first_batch
-        prev_batch_id = prev_batch['id']
         accum_logits = paddle.to_tensor(0.0)
 
         for step, inputs in enumerate(dataloader):
@@ -883,53 +832,8 @@ class PromptTrainer(PromptTrainer):
                 if batch_size is None:
                     batch_size = observed_batch_size
 
-            current_batch_id = inputs['id']
-            inputs = self._prepare_inputs(inputs)
+            if inputs['nth_chunk'][-1] != inputs['num_chunks'][-1]:
 
-            # Only one batch
-            if len(dataloader) == 1:
-                if len(inputs.unique()) == 1:
-                    with paddle.no_grad():
-                        # Model forward
-                        if has_labels:
-                            with self.autocast_smart_context_manager():
-                                _, logits = self.compute_forward(model, inputs)
-                
-                    loss = self.compute_loss(inputs, logits=logits, is_train=model.training)
-                    labels = inputs.pop("labels")[-1].unsqueeze(0) 
-
-                else:
-                    raise ValueError("Texts must be in the same verdict. ")
-
-            # Handle the last batch
-            elif step == len(dataloader) - 1:
-                with self.autocast_smart_context_manager():
-                    _, logits = self.compute_forward(model, inputs)
-                    accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
-                    accum_logits = paddle.nn.functional.sigmoid(accum_logits)
-                    loss = self.compute_loss(inputs, logits=accum_logits, is_train=model.training)
-                    logits = accum_logits
-                    labels = inputs.pop("labels")[-1].unsqueeze(0) 
-
-            # Batches have different IDs, calculate loss for the accumulated logits
-            elif (current_batch_id != prev_batch_id).any():
-        
-                accum_logits = paddle.nn.functional.sigmoid(accum_logits)
-
-                with self.autocast_smart_context_manager():
-                    loss = self.compute_loss(prev_batch, logits=accum_logits, is_train=model.training)
-
-                loss = loss.mean().detach()
-                logits = accum_logits
-                labels = prev_batch.pop("labels")[-1].unsqueeze(0) 
-
-                # Reset accumulators
-                accum_logits = paddle.to_tensor(0.0)
-                prev_batch = inputs
-                prev_batch_id = paddle.repeat_interleave(current_batch_id[-1], self.args.per_device_train_batch_size)
-
-            # Accumulate logits
-            else:
                 if self.args.pipeline_parallel_degree > 1:
                 # hack for pipeline mode
                     return self.prediction_pipeline_step(model, inputs, prediction_loss_only, ignore_keys)
@@ -951,13 +855,28 @@ class PromptTrainer(PromptTrainer):
                     labels = None
 
                 with paddle.no_grad():
-                    # Model forward
-                    if has_labels:
-                        with self.autocast_smart_context_manager():
-                            _, logits = self.compute_forward(model, inputs)
-                            accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
-                
+                    with self.autocast_smart_context_manager():
+                        _, logits = self.compute_forward(model, inputs)
+                        accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
                 continue
+
+            else:
+                accum_logits = nested_detach(accum_logits)
+                if isinstance(accum_logits, (list, tuple)) and len(accum_logits) == 1:
+                    accum_logits = accum_logits[0]
+
+                accum_logits = accum_logits / inputs['num_chunks'][-1]
+
+                with paddle.no_grad():
+                    with self.autocast_smart_context_manager():
+                        loss = self.compute_loss(inputs, logits=accum_logits, is_train=model.training)
+                    loss = loss.mean().detach()
+
+                logits = accum_logits
+                labels = inputs.pop("labels")[-1].unsqueeze(0) 
+
+                # Reset accumulators
+                accum_logits = paddle.to_tensor(0.0)
                     
             # Update containers on host
             if loss is not None:
@@ -1139,8 +1058,8 @@ def main():
 
     # Load the few-shot datasets.
     train_ds, dev_ds, test_ds = load_local_dataset(
-        data_path=data_args.data_dir, splits=["train", "dev", "test"], label_list=verbalizer.labels_to_ids, chunk_len=training_args.max_seq_length, overlap_length=20, \
-        prompt=data_args.prompt, other_tokens_length=3
+        data_path=data_args.data_dir, splits=["train", "dev", "test"], label_list=verbalizer.labels_to_ids, train_batch_size=training_args.train_batch_size , \
+        eval_batch_size=training_args.eval_batch_size , chunk_len=training_args.max_seq_length, overlap_length=10,  other_tokens_length=3
     )
 
 

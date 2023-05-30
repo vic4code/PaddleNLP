@@ -17,7 +17,7 @@ import os
 from paddlenlp.datasets import load_dataset
 
 
-def load_local_dataset(data_path, splits, label_list, chunk_len=None, prompt=None, other_tokens_length=None, overlap_length=None):
+def load_local_dataset(data_path, splits, label_list, train_batch_size, eval_batch_size, chunk_len=None, prompt=None, other_tokens_length=None, overlap_length=None):
     """
     Load dataset for multi-label classification from files, where
     there is one example per line. Text and label are seperated
@@ -33,13 +33,13 @@ def load_local_dataset(data_path, splits, label_list, chunk_len=None, prompt=Non
             The dictionary that maps labels to indeces.
     """
 
-    def chunker(text, chunk_len, prompt, other_tokens_length, overlap_length):
+    def chunker(text, chunk_len, batch_size, other_tokens_length, overlap_length):
         # other_tokens: [CLS], [MASK], [SEP]
         if chunk_len:
             sequence_length = len(text)
             # divider = chunk_len - len(prompt) - other_tokens_length
             divider = chunk_len
-            num_chunks = sequence_length // divider if sequence_length % divider == 0 else sequence_length // divider + 1
+            num_chunks = sequence_length // divider
             chunks = []
 
             i = 0
@@ -47,11 +47,15 @@ def load_local_dataset(data_path, splits, label_list, chunk_len=None, prompt=Non
                 start, end = i * divider - overlap_length if i * divider - overlap_length >= 0 else i * divider , (i + 1) * divider
                 chunks.append(text[start:end])
                 i += 1
+            
+            remainder = len(chunks) % batch_size
+            for i in range(remainder):
+                chunks.append("")
 
             return chunks
 
 
-    def _reader(data_file, label_list, chunk_len=chunk_len, overlap_length=overlap_length):
+    def _reader(data_file, label_list, batch_size, chunk_len=chunk_len, overlap_length=overlap_length):
         with open(data_file, "r", encoding="utf-8") as fp:
             for idx, line in enumerate(fp):
                 data = line.strip().split("\t")
@@ -61,10 +65,10 @@ def load_local_dataset(data_path, splits, label_list, chunk_len=None, prompt=Non
                     text, label = data
                     label = label.strip().split(",")
                     label = [float(1) if x in label else float(0) for x in label_list]
-                    chunks = chunker(text, chunk_len, prompt, other_tokens_length, overlap_length)
+                    chunks = chunker(text, chunk_len, batch_size, other_tokens_length, overlap_length)
 
                     for nth, chunk in enumerate(chunks) :
-                        yield {"id": idx , "nth_chunk": nth, "text_a": chunk, "labels": label}
+                        yield {"id": idx , "nth_chunk": nth, "num_chunks": len(chunks) - 1, "text_a": chunk, "labels": label}
                 else:
                     text, label = data
                     label = label.strip().split(",")
@@ -75,5 +79,8 @@ def load_local_dataset(data_path, splits, label_list, chunk_len=None, prompt=Non
     datasets = []
     for split in splits:
         data_file = os.path.join(data_path, split_map[split])
-        datasets.append(load_dataset(_reader, data_file=data_file, label_list=label_list, lazy=False))
+        if split == "train":
+            datasets.append(load_dataset(_reader, data_file=data_file, label_list=label_list, batch_size=train_batch_size, lazy=False))
+        else:
+            datasets.append(load_dataset(_reader, data_file=data_file, label_list=label_list, batch_size=eval_batch_size, lazy=False))
     return datasets
