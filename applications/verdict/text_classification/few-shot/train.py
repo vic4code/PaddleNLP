@@ -35,6 +35,7 @@ from paddlenlp.transformers import AutoModelForMaskedLM, AutoTokenizer
 from paddlenlp.utils.log import logger
 
 from paddlenlp.trainer.trainer import *
+from paddlenlp.trainer.trainer_callback import *
 from paddlenlp.transformers.model_utils import PretrainedModel, _add_variant, unwrap_model
 from paddlenlp.prompt.prompt_utils import *
 
@@ -120,7 +121,22 @@ class PromptDataCollatorWithPadding(PromptDataCollatorWithPadding):
         return batch
 
 
+class CallbackHandler(CallbackHandler):
+    def on_prediction_step(self, args, state, control, num_chunks, eval_dataloader=None, **kwargs):
+        if state.is_local_process_zero and has_length(eval_dataloader.dataset):
+            if self.prediction_bar is None:
+                self.prediction_bar = tqdm(total=len(eval_dataloader), leave=self.training_bar is None)
+            self.prediction_bar.update(num_chunks)
+
+
 class PromptTrainer(PromptTrainer):
+    def __post_init__(self):
+        default_callbacks = DEFAULT_CALLBACKS + get_reporting_integration_callbacks(self.args.report_to)
+        callbacks = default_callbacks if callbacks is None else default_callbacks + callbacks
+        self.callback_handler = CallbackHandler(
+            callbacks, self.model, self.tokenizer, self.optimizer, self.lr_scheduler
+        )
+    
     def _get_train_sampler(self) -> Optional[paddle.io.Sampler]:
         if self.train_dataset is None or not has_length(self.train_dataset):
             return None
@@ -455,7 +471,7 @@ class PromptTrainer(PromptTrainer):
                 
                 # print(inputs)
                 # breakpoint()
-
+                
                 if isinstance(train_dataloader, paddle.io.DataLoader) and isinstance(
                     train_dataloader.batch_sampler, NlpDistributedBatchSampler
                 ):
@@ -597,7 +613,7 @@ class PromptTrainer(PromptTrainer):
 
                     self.optimizer.clear_grad()
 
-                    self.state.global_step += 1
+                    self.state.global_step += inputs['num_chunks'][-1].item()
                     self.state.epoch = epoch + (step + 1) / steps_in_epoch
 
                     self.control = self.callback_handler.on_step_end(args, self.state, self.control)
@@ -893,7 +909,8 @@ class PromptTrainer(PromptTrainer):
                 if self.preprocess_logits_for_metrics is not None:
                     logits = self.preprocess_logits_for_metrics(logits, labels)
                 preds_host = logits if preds_host is None else nested_concat(preds_host, logits, padding_index=-100)
-            self.control = self.callback_handler.on_prediction_step(args, self.state, self.control)
+
+            self.control = self.callback_handler.on_prediction_step(args, self.state, self.control, num_chunks=inputs['num_chunks'][-1].item())
 
             # Gather all tensors and put them back on the CPU if we have done enough accumulation steps.
             if args.eval_accumulation_steps is not None and (step + 1) % args.eval_accumulation_steps == 0:
