@@ -537,6 +537,7 @@ class PromptTrainer(PromptTrainer):
                     accum_logits = paddle.to_tensor(0.0)
                 
                 else:
+                    logits.detach()
                     continue
 
                 tr_loss += loss.detach()
@@ -883,6 +884,7 @@ class PromptTrainer(PromptTrainer):
                 accum_logits = paddle.to_tensor(0.0)
             
             else:
+                logits.detach()
                 continue
                     
             # Update containers on host
