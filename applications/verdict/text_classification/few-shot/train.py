@@ -195,20 +195,17 @@ class PromptTrainer(PromptTrainer):
         """
 
         # model outputs depend on the args
-        loss, logits = model(**inputs)
+        logits = model(**inputs)
     
-        return loss, logits
+        return logits
 
 
-    def compute_loss(self, inputs, logits, return_outputs=True, is_train=False):
+    def compute_loss(self, labels, logits, return_outputs=True, is_train=False):
         """
-        Compute the total loss for every batch.
+        Compute the total loss for every batch in the same text id.
         """
 
-        if "labels" not in inputs:
-            raise ValueError("Fail to compute loss as `labels` not in {}.".format(inputs))
-        
-        labels = inputs["labels"][-1, :].unsqueeze(axis=0)
+        labels = labels[-1, :].unsqueeze(axis=0)
         loss = self.criterion(logits, labels)
 
         if is_train:
@@ -507,23 +504,24 @@ class PromptTrainer(PromptTrainer):
 
                 model.train()
                 inputs = self._prepare_inputs(inputs)
+                labels = inputs.pop("labels")
                 
                 # Model forward
                 if is_no_sync:
                 # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.
                     with model.no_sync():
-                        _, logits = self.compute_forward(model, inputs)
+                        logits = self.compute_forward(model, inputs)
                 else:
-                    _, logits = self.compute_forward(model, inputs)
+                    logits = self.compute_forward(model, inputs)
 
                 accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
                 
                 # Compute loss
-                if inputs['nth_chunk'][-1] == inputs['num_chunks'][-1]:
+                if inputs["nth_chunk"][-1] == inputs["num_chunks"][-1]:
 
-                    accum_logits = accum_logits / inputs['num_chunks'][-1]
+                    accum_logits = accum_logits / inputs["num_chunks"][-1]
                     with self.autocast_smart_context_manager():
-                        loss = self.compute_loss(inputs, logits=accum_logits, is_train=model.training)
+                        loss = self.compute_loss(labels, logits=accum_logits, is_train=model.training)
 
                     if self.args.gradient_accumulation_steps > 1:
                         loss = loss / self.args.gradient_accumulation_steps
@@ -602,7 +600,7 @@ class PromptTrainer(PromptTrainer):
 
                     self.optimizer.clear_grad()
 
-                    self.state.global_step += inputs['num_chunks'][-1].item()
+                    self.state.global_step += inputs["num_chunks"][-1].item()
                     self.state.epoch = epoch + (step + 1) / steps_in_epoch
 
                     self.control = self.callback_handler.on_step_end(args, self.state, self.control)
@@ -830,6 +828,8 @@ class PromptTrainer(PromptTrainer):
         accum_logits = paddle.to_tensor(0.0)
 
         for step, inputs in enumerate(dataloader):
+
+            labels = inputs.pop("labels")
             # Update the observed num examples
             observed_batch_size = find_batch_size(inputs)
             if observed_batch_size is not None:
@@ -861,24 +861,24 @@ class PromptTrainer(PromptTrainer):
 
             with paddle.no_grad():
                 with self.autocast_smart_context_manager():
-                    _, logits = self.compute_forward(model, inputs)
+                    logits = self.compute_forward(model, inputs)
                     accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))                
 
             # Compute loss
-            if inputs['nth_chunk'][-1] == inputs['num_chunks'][-1]:
+            if inputs["nth_chunk"][-1] == inputs["num_chunks"][-1]:
                 accum_logits = nested_detach(accum_logits)
                 if isinstance(accum_logits, (list, tuple)) and len(accum_logits) == 1:
                     accum_logits = accum_logits[0]
 
-                accum_logits = accum_logits / inputs['num_chunks'][-1]
+                accum_logits = accum_logits / inputs["num_chunks"][-1]
 
                 with paddle.no_grad():
                     with self.autocast_smart_context_manager():
-                        loss = self.compute_loss(inputs, logits=accum_logits, is_train=model.training)
+                        loss = self.compute_loss(labels, logits=accum_logits, is_train=model.training)
                     loss = loss.mean().detach()
 
                 logits = accum_logits
-                labels = inputs.pop("labels")[-1].unsqueeze(0) 
+                labels = labels[-1, :].unsqueeze(axis=0)
 
                 # Reset accumulators
                 accum_logits = paddle.to_tensor(0.0)
