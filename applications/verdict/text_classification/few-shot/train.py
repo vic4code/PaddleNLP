@@ -518,8 +518,10 @@ class PromptTrainer(PromptTrainer):
                     accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True).detach())
                 
                 else:
-                    accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True).detach())
-                    
+                    accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
+
+                del logits
+
                 # Compute loss
                 if inputs["nth_chunk"][-1] == inputs["num_chunks"][-1]:
 
@@ -539,7 +541,6 @@ class PromptTrainer(PromptTrainer):
                     accum_logits = paddle.to_tensor(0.0)
                 
                 else:
-                    logits.detach()
                     continue
 
                 tr_loss += loss.detach()
@@ -870,8 +871,10 @@ class PromptTrainer(PromptTrainer):
                         accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True).detach())
                     
                     else:
-                        accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True).detach())
+                        accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
                     
+            del logits
+
             # Compute loss
             if inputs["nth_chunk"][-1] == inputs["num_chunks"][-1]:
                 accum_logits = nested_detach(accum_logits)
