@@ -514,8 +514,12 @@ class PromptTrainer(PromptTrainer):
                 else:
                     logits = self.compute_forward(model, inputs)
 
-                accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))
+                if inputs["nth_chunk"][-1] != inputs["num_chunks"][-1]:
+                    accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True).detach())
                 
+                else:
+                    accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True).detach())
+                    
                 # Compute loss
                 if inputs["nth_chunk"][-1] == inputs["num_chunks"][-1]:
 
@@ -829,7 +833,6 @@ class PromptTrainer(PromptTrainer):
 
         for step, inputs in enumerate(dataloader):
 
-            labels = inputs.pop("labels")
             # Update the observed num examples
             observed_batch_size = find_batch_size(inputs)
             if observed_batch_size is not None:
@@ -861,9 +864,14 @@ class PromptTrainer(PromptTrainer):
 
             with paddle.no_grad():
                 with self.autocast_smart_context_manager():
+                    inputs.pop("labels")
                     logits = self.compute_forward(model, inputs)
-                    accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True))                
-
+                    if inputs["nth_chunk"][-1] != inputs["num_chunks"][-1]:
+                        accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True).detach())
+                    
+                    else:
+                        accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True).detach())
+                    
             # Compute loss
             if inputs["nth_chunk"][-1] == inputs["num_chunks"][-1]:
                 accum_logits = nested_detach(accum_logits)
@@ -884,7 +892,6 @@ class PromptTrainer(PromptTrainer):
                 accum_logits = paddle.to_tensor(0.0)
             
             else:
-                logits.detach()
                 continue
                     
             # Update containers on host
