@@ -68,7 +68,7 @@ def load_local_dataset(data_path, splits, label_list, train_batch_size, eval_bat
                     chunks = chunker(text, chunk_len, batch_size, other_tokens_length, overlap_length)
 
                     for nth, chunk in enumerate(chunks) :
-                        yield {"id": idx , "nth_chunk": nth, "num_chunks": len(chunks) - 1, "text_a": chunk, "labels": label}
+                        yield {"id": idx , "nth_chunk": nth, "num_chunks": len(chunks), "text_a": chunk, "labels": label}
                 else:
                     text, label = data
                     label = label.strip().split(",")

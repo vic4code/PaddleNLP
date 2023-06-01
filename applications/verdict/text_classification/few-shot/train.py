@@ -514,7 +514,7 @@ class PromptTrainer(PromptTrainer):
                 else:
                     logits = self.compute_forward(model, inputs)
 
-                if inputs["nth_chunk"][-1] != inputs["num_chunks"][-1]:
+                if inputs["nth_chunk"][-1] != inputs["num_chunks"][-1] - 1:
                     accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True).detach())
                 
                 else:
@@ -523,7 +523,7 @@ class PromptTrainer(PromptTrainer):
                 del logits
 
                 # Compute loss
-                if inputs["nth_chunk"][-1] == inputs["num_chunks"][-1]:
+                if inputs["nth_chunk"][-1] == inputs["num_chunks"][-1] - 1:
 
                     accum_logits = accum_logits / inputs["num_chunks"][-1]
                     with self.autocast_smart_context_manager():
@@ -867,7 +867,7 @@ class PromptTrainer(PromptTrainer):
                 with self.autocast_smart_context_manager():
                     inputs.pop("labels")
                     logits = self.compute_forward(model, inputs)
-                    if inputs["nth_chunk"][-1] != inputs["num_chunks"][-1]:
+                    if inputs["nth_chunk"][-1] != inputs["num_chunks"][-1] - 1:
                         accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True).detach())
                     
                     else:
@@ -876,7 +876,7 @@ class PromptTrainer(PromptTrainer):
             del logits
 
             # Compute loss
-            if inputs["nth_chunk"][-1] == inputs["num_chunks"][-1]:
+            if inputs["nth_chunk"][-1] == inputs["num_chunks"][-1] - 1:
                 accum_logits = nested_detach(accum_logits)
                 if isinstance(accum_logits, (list, tuple)) and len(accum_logits) == 1:
                     accum_logits = accum_logits[0]
