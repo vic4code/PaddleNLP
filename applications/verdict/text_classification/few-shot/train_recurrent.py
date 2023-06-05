@@ -446,17 +446,13 @@ class PromptTrainer(PromptTrainer):
 
             accum_logits = paddle.to_tensor(0.0)
             tr_loss = paddle.to_tensor(0.0)
-            # mems = paddle.randn((self.per_device_train_batch_size, self.args., self.per_device_train_batch_size))
             mems = None
             
             for step, inputs in enumerate(epoch_iterator):
                 # Skip past any already trained steps if resuming training
                 # for paddlenlp.utils.batch_sampler.DistributedBatchSampler
                 # We use consumed_samples to reset the status
-                
-                # print(inputs)
-                # breakpoint()
-                
+
                 if isinstance(train_dataloader, paddle.io.DataLoader) and isinstance(
                     train_dataloader.batch_sampler, NlpDistributedBatchSampler
                 ):
@@ -517,17 +513,13 @@ class PromptTrainer(PromptTrainer):
                         outputs = self.compute_forward(model, inputs)
                 else:
                     outputs = self.compute_forward(model, inputs)                    
-                
-                logits, mems = outputs.logits, outputs.mems
 
-                print(mems)
-                # breakpoint()
+                logits, mems = outputs.logits, outputs.mems
 
                 # Compute loss
                 if inputs["nth_chunk"][-1] == inputs["num_chunks"][-1] - 1 :
 
-                    logits = logits.sum(axis=0, keepdim=True) / inputs["num_chunks"][-1]
-
+                    logits = logits.sum(axis=0, keepdim=True) / self.args.train_batch_size
                     with self.autocast_smart_context_manager():
                         loss = self.compute_loss(labels, logits=logits, is_train=model.training)
 
@@ -539,8 +531,8 @@ class PromptTrainer(PromptTrainer):
                     else:
                         loss.backward()
 
-                    # Reset accumulators
-                    # mems = None
+                    # Reset mems
+                    mems = None
                 
                 else:
                     continue
@@ -831,8 +823,6 @@ class PromptTrainer(PromptTrainer):
         observed_num_examples = 0
         # Main evaluation loop
         losses = []
-        # tmp_batch = None
-        # accum_logits = paddle.to_tensor(0.0)
         mems = None
 
         for step, inputs in enumerate(dataloader):
@@ -872,7 +862,7 @@ class PromptTrainer(PromptTrainer):
                 with self.autocast_smart_context_manager():
                     outputs = self.compute_forward(model, inputs)
 
-            logits, memes = outputs.logits, outputs.mems
+            logits, mems = outputs.logits, outputs.mems
 
             # Compute loss
             if inputs["nth_chunk"][-1] == inputs["num_chunks"][-1] - 1:
@@ -880,8 +870,8 @@ class PromptTrainer(PromptTrainer):
                 if isinstance(logits, (list, tuple)) and len(logits) == 1:
                     logits = logits[0]
 
-                logits = logits.sum(axis=0, keepdim=True) / inputs["num_chunks"][-1]
-                
+                logits = logits.sum(axis=0, keepdim=True) / self.args.eval_batch_size
+
                 with paddle.no_grad():
                     with self.autocast_smart_context_manager():
                         loss = self.compute_loss(labels, logits=logits, is_train=model.training)
@@ -889,9 +879,8 @@ class PromptTrainer(PromptTrainer):
 
                 labels = labels[-1, :].unsqueeze(axis=0)
 
-                # Reset accumulators
-                # accum_logits = paddle.to_tensor(0.0)
-                # mems = None
+                # Reset mems
+                mems = None
 
             else:
                 continue
@@ -1130,9 +1119,9 @@ def main():
         trainer.log_metrics("test", test_ret.metrics)
 
     # Export static model.
-    if training_args.do_export:
-        export_path = os.path.join(training_args.output_dir, "export")
-        trainer.export_model(export_path, export_type=model_args.export_type)
+    # if training_args.do_export:
+    #     export_path = os.path.join(training_args.output_dir, "export")
+    #     trainer.export_model(export_path, export_type=model_args.export_type)
 
 
 if __name__ == "__main__":

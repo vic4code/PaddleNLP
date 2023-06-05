@@ -286,13 +286,13 @@ class XLNetRelativeAttention(Layer):
             # Compute k_head_h = einsum4x4("ibh,hnd->ibnd", cat, self.k)
             k_head_h = paddle.matmul(cat, self.k)
             k_head_h = paddle.reshape(
-                k_head_h, shape=[paddle.shape(h)[0], paddle.shape(h)[1], self.n_head, self.d_head]
+                k_head_h, shape=[paddle.shape(cat)[0], paddle.shape(cat)[1], self.n_head, self.d_head]
             )
 
             # Compute v_head_h = einsum4x4("ibh,hnd->ibnd", cat, self.v)
             v_head_h = paddle.matmul(cat, self.v)
             v_head_h = paddle.reshape(
-                v_head_h, shape=[paddle.shape(h)[0], paddle.shape(h)[1], self.n_head, self.d_head]
+                v_head_h, shape=[paddle.shape(cat)[0], paddle.shape(cat)[1], self.n_head, self.d_head]
             )
 
             # Position-based key head
@@ -778,6 +778,7 @@ class XLNetModel(XLNetPretrainedModel):
 
     def __init__(self, config: XLNetConfig):
         super(XLNetModel, self).__init__(config)
+        self.config = config
         self.initializer_range = config.initializer_range
         self.mem_len = config.mem_len
         self.reuse_len = config.reuse_len
@@ -814,10 +815,10 @@ class XLNetModel(XLNetPretrainedModel):
         return ret
 
     def cache_mem(self, curr_out, prev_mem):
+
         # Cache hidden states into memory.
         if self.reuse_len is not None and self.reuse_len > 0:
             curr_out = curr_out[: self.reuse_len]
-
         if self.mem_len is None or self.mem_len == 0:
             # If `use_mems` is active but no `mem_len` is defined, the model behaves like GPT-2 at inference time
             # and returns all of the past and current hidden states.
@@ -831,6 +832,9 @@ class XLNetModel(XLNetPretrainedModel):
             new_mem = curr_out[cutoff:]
         else:
             new_mem = paddle.concat([prev_mem, curr_out], axis=0)[cutoff:]
+        
+        # mems to (B, T, H)
+        # new_mem = paddle.transpose(new_mem, perm=[1, 0, 2])
 
         return new_mem.detach()
 
@@ -1033,6 +1037,13 @@ class XLNetModel(XLNetPretrainedModel):
         else:
             use_mems = use_mems_eval
 
+        # if use_mems:
+        #     if mems is None:
+        #         batch_size, sequence_length = input_ids.shape
+        #         mems = paddle.zeros(shape=[batch_size, sequence_length, self.config.d_model])
+
+                # print(mems)
+                # breakpoint() 
         # The original code for XLNet uses shapes [len, bsz] with the batch dimension at the end
         # but we want a unified interface in the library with the batch size on the first dimension
         # so we move here the first dimension (batch) to the end
@@ -1118,7 +1129,7 @@ class XLNetModel(XLNetPretrainedModel):
             output_g = self.dropout(word_emb_q)
         else:
             output_g = None
-
+        
         # Segment embedding
         if token_type_ids is not None:
             # Convert `token_type_ids` to one-hot `seg_mat`
@@ -1164,10 +1175,14 @@ class XLNetModel(XLNetPretrainedModel):
         for i, layer_module in enumerate(self.layer):
             if use_mems:
                 # Cache new mems
-                new_mems = new_mems + (self.cache_mem(output_h, mems[i]),)
+                # output_h (T, B, H), mem to (T, B, H)
+                # mem = mems[i] if mems[i] is None else paddle.transpose(mems[i], perm=[1, 0, 2])
+                mem = mems[i]
+                new_mems = new_mems + (self.cache_mem(output_h, mem),)
             if output_hidden_states:
                 hidden_states.append((output_h, output_g) if output_g is not None else output_h)
-
+            
+            # mems to (T, B, H)
             outputs = layer_module(
                 output_h,
                 output_g,
@@ -2056,8 +2071,8 @@ class XLNetForMaskedLM(XLNetPretrainedModel):
         masked_positions: Optional[Tensor] = None,
         inputs_embeds=None,
         labels=None,
-        use_mems_train=False,
-        use_mems_eval=False,
+        use_mems_train=True,
+        use_mems_eval=True,
         output_attentions=False,
         output_hidden_states=False,
         return_dict=False,
@@ -2113,6 +2128,7 @@ class XLNetForMaskedLM(XLNetPretrainedModel):
                 # [1, 17, 18000]
 
         """
+
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         outputs = self.transformer(
             input_ids,
