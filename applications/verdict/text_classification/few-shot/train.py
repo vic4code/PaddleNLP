@@ -205,7 +205,6 @@ class PromptTrainer(PromptTrainer):
         Compute the total loss for every batch in the same text id.
         """
 
-        labels = labels[-1, :].unsqueeze(axis=0)
         loss = self.criterion(logits, labels)
 
         if is_train:
@@ -445,7 +444,10 @@ class PromptTrainer(PromptTrainer):
 
             accum_logits = paddle.to_tensor(0.0)
             tr_loss = paddle.to_tensor(0.0)
-            
+            minibatch_labels = None
+            minibatch_logits = None
+            minibatch_size = 2
+
             for step, inputs in enumerate(epoch_iterator):
                 # Skip past any already trained steps if resuming training
                 # for paddlenlp.utils.batch_sampler.DistributedBatchSampler
@@ -504,7 +506,7 @@ class PromptTrainer(PromptTrainer):
 
                 model.train()
                 inputs = self._prepare_inputs(inputs)
-                labels = inputs.pop("labels")
+                labels = inputs.pop("labels")[-1, :].unsqueeze(axis=0)
                 
                 # Model forward
                 if is_no_sync:
@@ -524,22 +526,32 @@ class PromptTrainer(PromptTrainer):
 
                 # Compute loss
                 if inputs["nth_chunk"][-1] == inputs["num_chunks"][-1] - 1:
-
+                    
                     accum_logits = accum_logits / inputs["num_chunks"][-1]
-                    with self.autocast_smart_context_manager():
-                        loss = self.compute_loss(labels, logits=accum_logits, is_train=model.training)
-
-                    if self.args.gradient_accumulation_steps > 1:
-                        loss = loss / self.args.gradient_accumulation_steps
-
-                    if self.do_grad_scaling:
-                        self.scaler.scale(loss).backward()
-                    else:
-                        loss.backward()
+                    minibatch_logits = accum_logits if minibatch_logits is None else paddle.concat([minibatch_logits, accum_logits], axis=0)
+                    minibatch_labels = labels if minibatch_labels is None else paddle.concat([minibatch_labels, labels], axis=0)
 
                     # Reset accumulators
                     accum_logits = paddle.to_tensor(0.0)
-                
+
+                    if (inputs["id"][-1] + 1) % minibatch_size == 0 or (inputs["id"][-1] + 1) == len(epoch_iterator):
+                        with self.autocast_smart_context_manager():
+                            loss = self.compute_loss(labels=minibatch_labels, logits=minibatch_logits, is_train=model.training)
+
+                        if self.args.gradient_accumulation_steps > 1:
+                            loss = loss / self.args.gradient_accumulation_steps
+
+                        if self.do_grad_scaling:
+                            self.scaler.scale(loss).backward()
+                        else:
+                            loss.backward()
+                        
+                        minibatch_logits = None
+                        minibatch_labels = None
+
+                    else:                        
+                        continue
+                    
                 else:
                     continue
 
@@ -831,6 +843,9 @@ class PromptTrainer(PromptTrainer):
         losses = []
         # tmp_batch = None
         accum_logits = paddle.to_tensor(0.0)
+        minibatch_labels = None
+        minibatch_logits = None
+        minibatch_size = 2
 
         for step, inputs in enumerate(dataloader):
 
@@ -865,7 +880,7 @@ class PromptTrainer(PromptTrainer):
 
             with paddle.no_grad():
                 with self.autocast_smart_context_manager():
-                    inputs.pop("labels")
+                    labels = inputs.pop("labels")[-1, :].unsqueeze(axis=0)
                     logits = self.compute_forward(model, inputs)
                     if inputs["nth_chunk"][-1] != inputs["num_chunks"][-1] - 1:
                         accum_logits = paddle.add(accum_logits, logits.sum(axis=0, keepdim=True).detach())
@@ -882,18 +897,28 @@ class PromptTrainer(PromptTrainer):
                     accum_logits = accum_logits[0]
 
                 accum_logits = accum_logits / inputs["num_chunks"][-1]
-
-                with paddle.no_grad():
-                    with self.autocast_smart_context_manager():
-                        loss = self.compute_loss(labels, logits=accum_logits, is_train=model.training)
-                    loss = loss.mean().detach()
-
-                logits = accum_logits
-                labels = labels[-1, :].unsqueeze(axis=0)
+                minibatch_logits = accum_logits if minibatch_logits is None else paddle.concat([minibatch_logits, accum_logits], axis=0)
+                minibatch_labels = labels if minibatch_labels is None else paddle.concat([minibatch_labels, labels], axis=0)
 
                 # Reset accumulators
                 accum_logits = paddle.to_tensor(0.0)
-            
+
+                if (inputs["id"][-1] + 1) % minibatch_size == 0 or (inputs["id"][-1] + 1) == len(dataloader): 
+                    with paddle.no_grad():
+                        with self.autocast_smart_context_manager():
+                            loss = self.compute_loss(labels=minibatch_labels, logits=minibatch_logits, is_train=model.training)
+                        loss = loss.mean().detach()
+
+                    logits = minibatch_logits
+                    labels = minibatch_labels
+                    # labels = labels[-1, :].unsqueeze(axis=0)
+
+                    minibatch_logits = None
+                    minibatch_labels = None
+
+                else:
+                    continue
+
             else:
                 continue
                     
@@ -1131,9 +1156,9 @@ def main():
         trainer.log_metrics("test", test_ret.metrics)
 
     # Export static model.
-    if training_args.do_export:
-        export_path = os.path.join(training_args.output_dir, "export")
-        trainer.export_model(export_path, export_type=model_args.export_type)
+    # if training_args.do_export:
+    #     export_path = os.path.join(training_args.output_dir, "export")
+    #     trainer.export_model(export_path, export_type=model_args.export_type)
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 import paddle
 import paddle.nn.functional as F
 from metric import MetricReport
-from utils import load_local_dataset
+from utils_ import load_local_dataset
 
 from paddlenlp.prompt import (
     AutoTemplate,
