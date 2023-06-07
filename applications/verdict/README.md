@@ -148,3 +148,30 @@ python -u -m paddle.distributed.launch --gpus 0,1 train.py --data_dir ./data/dat
 ```
 python train.py --data_dir ./data/dataset --output_dir ./checkpoints/ --prompt "這句話要包含的要素有" --model_name_or_path ernie-3.0-base-zh --max_seq_length 64 --learning_rate 3e-5 --ppt_learning_rate 3e-4 --do_train --do_eval --do_predict --do_export --num_train_epochs 10 --logging_steps 5 --save_total_limit 1 --per_device_eval_batch_size 1 --per_device_train_batch_size 2 --metric_for_best_model micro_f1_score --load_best_model_at_end --evaluation_strategy epoch --save_strategy epoch  --dataloader_drop_last True
 ```
+
+### UTC
+```
+python run_train.py  \
+    --device gpu \
+    --logging_steps 10 \
+    --save_steps 100 \
+    --eval_steps 100 \
+    --seed 1000 \
+    --model_name_or_path utc-base \
+    --output_dir ./checkpoint/model_best \
+    --dataset_path ./data/dataset \
+    --max_seq_length 512  \
+    --per_device_train_batch_size 2 \
+    --per_device_eval_batch_size 2 \
+    --gradient_accumulation_steps 8 \
+    --num_train_epochs 1 \
+    --learning_rate 1e-5 \
+    --do_train \
+    --do_eval \
+    --do_predict \
+    --do_export \
+    --export_model_dir ./checkpoint/model_best \
+    --overwrite_output_dir \
+    --disable_tqdm True \
+    --metric_for_best_model micro_f1 \
+```

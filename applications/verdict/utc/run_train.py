@@ -17,7 +17,8 @@ from dataclasses import dataclass, field
 import paddle
 from paddle.metric import Accuracy
 from paddle.static import InputSpec
-from sklearn.metrics import f1_score
+# from sklearn.metrics import f1_score
+from metric import MetricReport
 from utils import UTCLoss, read_local_dataset
 
 from paddlenlp.datasets import load_dataset
@@ -39,6 +40,7 @@ class DataArguments:
     )
     train_file: str = field(default="train.txt", metadata={"help": "Train dataset file name."})
     dev_file: str = field(default="dev.txt", metadata={"help": "Dev dataset file name."})
+    test_file: str = field(default="test.txt", metadata={"help": "Test dataset file name."})
     threshold: float = field(default=0.5, metadata={"help": "The threshold to produce predictions."})
     single_label: str = field(default=False, metadata={"help": "Predict exactly one label per sample."})
 
@@ -85,6 +87,14 @@ def main():
         lazy=False,
     )
 
+    test_ds = load_dataset(
+        read_local_dataset,
+        data_path=data_args.dataset_path,
+        data_file=data_args.test_file,
+        lazy=False,
+    )
+
+
     # Define the criterion.
     criterion = UTCLoss()
 
@@ -106,16 +116,18 @@ def main():
         return {"accuracy": acc}
 
     def compute_metrics(eval_preds):
-        labels = paddle.to_tensor(eval_preds.label_ids, dtype="int64")
+        metric = MetricReport()
+        # labels = paddle.to_tensor(eval_preds.label_ids, dtype="int64")
         preds = paddle.to_tensor(eval_preds.predictions)
         preds = paddle.nn.functional.sigmoid(preds)
-        preds = preds[labels != -100].numpy()
-        labels = labels[labels != -100].numpy()
-        preds = preds > data_args.threshold
-        micro_f1 = f1_score(y_pred=preds, y_true=labels, average="micro")
-        macro_f1 = f1_score(y_pred=preds, y_true=labels, average="macro")
-
-        return {"micro_f1": micro_f1, "macro_f1": macro_f1}
+        # preds = preds[labels != -100].numpy()
+        # labels = labels[labels != -100].numpy()
+        # preds = preds > data_args.threshold
+        # micro_f1 = f1_score(y_pred=preds, y_true=labels, average="micro")
+        # macro_f1 = f1_score(y_pred=preds, y_true=labels, average="macro")
+        metric.update(preds, paddle.to_tensor(eval_preds.label_ids))
+        micro_f1_score, macro_f1_score, accuracy, precision, recall = metric.accumulate()
+        return {"micro_f1_score": micro_f1_score, "macro_f1_score": macro_f1_score, "accuracy_score": accuracy, "precision_score": precision, "recall_score": recall}
 
     trainer = PromptTrainer(
         model=prompt_model,
@@ -136,6 +148,10 @@ def main():
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         trainer.save_state()
+
+    if training_args.do_predict:
+        test_ret = trainer.predict(test_ds)
+        trainer.log_metrics("test", test_ret.metrics)
 
     # Export.
     if training_args.do_export:
