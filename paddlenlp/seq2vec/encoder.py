@@ -127,7 +127,7 @@ class CNNEncoder(nn.Layer):
     A `CNNEncoder` takes as input a sequence of vectors and returns a
     single vector, a combination of multiple convolution layers and max pooling layers.
     The input to this encoder is of shape `(batch_size, num_tokens, emb_dim)`,
-    and the output is of shape `(batch_size, ouput_dim)` or `(batch_size, len(ngram_filter_sizes) * num_filter)`.
+    and the output is of shape `(batch_size, output_dim)` or `(batch_size, len(ngram_filter_sizes) * num_filter)`.
 
     The CNN has one convolution layer for each ngram filter size. Each convolution operation gives
     out a vector of size num_filter. The number of times a convolution layer will be used
@@ -260,7 +260,7 @@ class CNNEncoder(nn.Layer):
                 Shape as `(batch_size, num_tokens, emb_dim)` and dtype as `float32` or `float64`.
                 Tensor containing the features of the input sequence.
             mask (Tensor, optional):
-                Shape shoule be same as `inputs` and dtype as `int32`, `int64`, `float32` or `float64`.
+                Shape should be same as `inputs` and dtype as `int32`, `int64`, `float32` or `float64`.
                 Its each elements identify whether the corresponding input token is padding or not.
                 If True, not padding token. If False, padding token.
                 Defaults to `None`.
@@ -319,7 +319,7 @@ class GRUEncoder(nn.Layer):
             Defaults to 1.
         direction (str, optional):
             The direction of the network. It can be "forward" and "bidirect"
-            (it means bidirection network). If "bidirect", it is a birectional GRU,
+            (it means bidirection network). If "bidirect", it is a bidirectional GRU,
             and returns the concat output from both directions.
             Defaults to "forward".
         dropout (float, optional):
@@ -426,7 +426,7 @@ class GRUEncoder(nn.Layer):
 
     def forward(self, inputs, sequence_length):
         r"""
-        GRUEncoder takes the a sequence of vectors and and returns a single vector,
+        GRUEncoder takes the a sequence of vectors and returns a single vector,
         which is a combination of multiple GRU layers. The input to this
         encoder is of shape `(batch_size, num_tokens, input_size)`,
         The output is of shape `(batch_size, hidden_size * 2)` if GRU is bidirection;
@@ -504,7 +504,7 @@ class LSTMEncoder(nn.Layer):
             Defaults to 1.
         direction (str, optional):
             The direction of the network. It can be "forward" or "bidirect" (it means bidirection network).
-            If "bidirect", it is a birectional LSTM, and returns the concat output from both directions.
+            If "bidirect", it is a bidirectional LSTM, and returns the concat output from both directions.
             Defaults to "forward".
         dropout (float, optional):
             If non-zero, introduces a Dropout layer on the outputs of each LSTM layer
@@ -610,7 +610,7 @@ class LSTMEncoder(nn.Layer):
 
     def forward(self, inputs, sequence_length):
         r"""
-        LSTMEncoder takes the a sequence of vectors and and returns a
+        LSTMEncoder takes the a sequence of vectors and returns a
         single vector, which is a combination of multiple LSTM layers.
         The input to this encoder is of shape `(batch_size, num_tokens, input_size)`,
         The output is of shape `(batch_size, hidden_size * 2)` if LSTM is bidirection;
@@ -688,7 +688,7 @@ class RNNEncoder(nn.Layer):
             Defaults to 1.
         direction (str, optional):
             The direction of the network. It can be "forward" and "bidirect"
-            (it means bidirection network). If "biderect", it is a birectional RNN,
+            (it means bidirection network). If "bidirect", it is a bidirectional RNN,
             and returns the concat output from both directions. Defaults to "forward"
         dropout (float, optional):
             If non-zero, introduces a Dropout layer on the outputs of each RNN layer
@@ -794,7 +794,7 @@ class RNNEncoder(nn.Layer):
 
     def forward(self, inputs, sequence_length):
         r"""
-        RNNEncoder takes the a sequence of vectors and and returns a
+        RNNEncoder takes the a sequence of vectors and returns a
         single vector, which is a combination of multiple RNN layers.
         The input to this encoder is of shape `(batch_size, num_tokens, input_size)`.
         The output is of shape `(batch_size, hidden_size * 2)` if RNN is bidirection;

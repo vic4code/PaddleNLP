@@ -12,31 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import argparse
-import logging
 import os
-import sys
 import random
 import time
-import math
-import distutils.util
 from functools import partial
 
+import args
 import numpy as np
 import paddle
 from paddle.io import DataLoader
-from paddle.metric import Metric, Accuracy, Precision, Recall
+from paddle.metric import Accuracy
 
+from paddlenlp.data import Stack
 from paddlenlp.datasets import load_dataset
-from paddlenlp.data import Stack, Tuple, Pad, Dict
-from paddlenlp.data.sampler import SamplerHelper
-from paddlenlp.transformers import BigBirdModel, BigBirdForSequenceClassification, BigBirdTokenizer
-from paddlenlp.transformers import create_bigbird_rand_mask_idx_list
-from paddlenlp.transformers import LinearDecayWithWarmup
 from paddlenlp.metrics import AccuracyAndF1, Mcc, PearsonAndSpearman
+from paddlenlp.transformers import (
+    BigBirdForSequenceClassification,
+    BigBirdTokenizer,
+    LinearDecayWithWarmup,
+    create_bigbird_rand_mask_idx_list,
+)
 from paddlenlp.utils.log import logger
-
-import args
 
 METRIC_CLASSES = {
     "cola": Mcc,
@@ -77,18 +73,19 @@ def convert_example(example, tokenizer, label_list, max_seq_length=512, is_test=
     token_type_ids = None
 
     if (int(is_test) + len(example)) == 2:
-        input_ids.extend(tokenizer.convert_tokens_to_ids(tokenizer(example["sentence"])[: max_seq_length - 2]))
+        input_ids.extend(tokenizer(example["sentence"])["input_ids"][: max_seq_length - 2])
         input_ids.append(tokenizer.sep_id)
         input_len = len(input_ids)
         token_type_ids = input_len * [0]
     else:
-        input_ids1 = tokenizer.convert_tokens_to_ids(tokenizer(example["sentence1"]))
-        input_ids2 = tokenizer.convert_tokens_to_ids(tokenizer(example["sentence2"]))
-        total_len = len(input_ids1) + len(input_ids2) + tokenizer.num_special_tokens_to_add(pair=True)
+        input_ids1 = tokenizer(example["sentence1"])["input_ids"]
+        input_ids2 = tokenizer(example["sentence2"])["input_ids"]
+        total_len = len(input_ids1) + len(input_ids2) + tokenizer.num_special_tokens_to_add(pair=True) + 1
         if total_len > max_seq_length:
             input_ids1, input_ids2, _ = tokenizer.truncate_sequences(
                 input_ids1, input_ids2, total_len - max_seq_length
             )
+
         input_ids.extend(input_ids1)
         input_ids.append(tokenizer.sep_id)
         input_len1 = len(input_ids)
@@ -190,7 +187,7 @@ def do_train(args):
     train_ds = load_dataset("glue", args.task_name, splits="train")
     tokenizer = tokenizer_class.from_pretrained(args.model_name_or_path)
 
-    num_classes = 1 if train_ds.label_list == None else len(train_ds.label_list)
+    num_classes = 1 if train_ds.label_list is None else len(train_ds.label_list)
     # In finetune task, bigbird performs better when setting dropout to zero.
     model = model_class.from_pretrained(
         args.model_name_or_path, num_classes=num_classes, attn_dropout=0.0, hidden_dropout_prob=0.0
@@ -261,7 +258,7 @@ def do_train(args):
         apply_decay_param_fun=lambda x: x in decay_params,
     )
 
-    loss_fct = paddle.nn.loss.CrossEntropyLoss() if train_ds.label_list else paddle.nn.loss.MSELoss()
+    loss_fct = paddle.nn.CrossEntropyLoss() if train_ds.label_list else paddle.nn.MSELoss()
 
     metric = metric_class()
     global_step = 0
@@ -327,5 +324,10 @@ def print_arguments(args):
 if __name__ == "__main__":
     args = args.parse_args()
     print_arguments(args)
-    assert args.device in ["cpu", "gpu", "xpu"], "Invalid device! Available device should be cpu, gpu, or xpu."
+    assert args.device in [
+        "cpu",
+        "gpu",
+        "xpu",
+        "npu",
+    ], "Invalid device! Available device should be cpu, gpu, xpu or npu."
     do_train(args)

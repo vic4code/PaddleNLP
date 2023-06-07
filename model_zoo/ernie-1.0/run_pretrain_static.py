@@ -283,7 +283,7 @@ def run_evaluate(
         ret = exe.run(program, feed=batch, fetch_list=list(eval_fetch.values()))
         if is_last:
             for k, v in zip(list(eval_fetch.keys()), ret):
-                all_ret[k].append(float(v[0]))
+                all_ret[k].append(v.item())
 
         if eval_step >= iter_steps - 1:
             if not is_last or log_writer is None:
@@ -345,6 +345,7 @@ def do_train(args):
 
     worker_num = fleet.worker_num()
     worker_index = fleet.worker_index()
+
     assert (
         args.dp_degree * args.sharding_degree * args.mp_degree * args.pp_degree == worker_num
     ), "The product of degree num should be equal to worker_num."
@@ -591,7 +592,7 @@ def do_train(args):
             if log_writer is not None:
                 for k, v in zip(fetchs_keys, ret):
                     if k in fetch_loss_vars:
-                        loss_res[k].append(v[0])
+                        loss_res[k].append(v.item())
 
             if (step + 1) % args.accumulate_steps != 0:
                 continue
@@ -607,7 +608,7 @@ def do_train(args):
                             res[k] = sum(loss_res[k]) / len(loss_res[k]) / worker_num
                             loss_res[k] = []
                         else:
-                            res[k] = v[0]
+                            res[k] = v
 
                     speed = args.logging_freq / (time.time() - tic_train)
                     res["global_step"] = global_step

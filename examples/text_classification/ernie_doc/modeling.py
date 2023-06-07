@@ -15,8 +15,9 @@
 import paddle
 import paddle.nn as nn
 import paddle.nn.functional as F
-from paddlenlp.transformers.attention_utils import _convert_param_attr_to_list
+
 from paddlenlp.transformers import PretrainedModel, register_base_model
+from paddlenlp.transformers.attention_utils import _convert_param_attr_to_list
 
 __all__ = [
     "ErnieDocModel",
@@ -251,7 +252,7 @@ class ErnieDocEncoder(nn.Layer):
         if self.mem_len is None or self.mem_len == 0:
             return None
         if prev_mem is None:
-            new_mem = curr[:, -self.mem_len :, :]
+            new_mem = curr_out[:, -self.mem_len :, :]
         else:
             new_mem = paddle.concat([prev_mem, curr_out], 1)[:, -self.mem_len :, :]
         new_mem.stop_gradient = True
@@ -335,7 +336,7 @@ class ErnieDocPretrainedModel(PretrainedModel):
     }
     base_model_prefix = "ernie_doc"
 
-    def init_weights(self, layer):
+    def _init_weights(self, layer):
         # Initialization hook
         if isinstance(layer, (nn.Linear, nn.Embedding)):
             # In the dygraph mode, use the `set_value` to reset the parameter directly,
@@ -681,7 +682,6 @@ class ErnieDocForSequenceClassification(ErnieDocPretrainedModel):
         self.ernie_doc = ernie_doc
         self.linear = nn.Linear(self.ernie_doc.config["hidden_size"], num_classes)
         self.dropout = nn.Dropout(dropout, mode="upscale_in_train")
-        self.apply(self.init_weights)
 
     def forward(self, input_ids, memories, token_type_ids, position_ids, attn_mask):
         r"""
@@ -773,7 +773,6 @@ class ErnieDocForTokenClassification(ErnieDocPretrainedModel):
         self.ernie_doc = ernie_doc  # allow ernie_doc to be config
         self.dropout = nn.Dropout(dropout, mode="upscale_in_train")
         self.linear = nn.Linear(self.ernie_doc.config["hidden_size"], num_classes)
-        self.apply(self.init_weights)
 
     def forward(self, input_ids, memories, token_type_ids, position_ids, attn_mask):
         r"""
@@ -864,7 +863,6 @@ class ErnieDocForQuestionAnswering(ErnieDocPretrainedModel):
         self.ernie_doc = ernie_doc  # allow ernie_doc to be config
         self.dropout = nn.Dropout(dropout, mode="upscale_in_train")
         self.linear = nn.Linear(self.ernie_doc.config["hidden_size"], 2)
-        self.apply(self.init_weights)
 
     def forward(self, input_ids, memories, token_type_ids, position_ids, attn_mask):
         r"""

@@ -19,6 +19,7 @@ from functools import partial
 from typing import Any, Optional, Tuple, Union
 
 import paddle
+import paddle.distributed as dist
 import paddle.nn.functional as F
 from paddle import nn
 
@@ -185,13 +186,6 @@ class ChineseCLIPPretrainedModel(PretrainedModel):
     supports_gradient_checkpointing = True
     _keys_to_ignore_on_load_missing = [r"position_ids"]
 
-    def init_weights(self):
-        """
-        A method executed at the end of each Transformer model initialization, to execute code that needs the model's
-        modules properly initialized (such as weight initialization).
-        """
-        self.apply(self._init_weights)
-
     def _set_gradient_checkpointing(self, module, value=False):
         if isinstance(module, nn.TransformerEncoder):
             module.enable_recompute = value
@@ -301,7 +295,6 @@ class ChineseCLIPTextModel(ChineseCLIPPretrainedModel):
         self.text_model = BertModel(config)
         if not add_pooling_layer:
             self.text_model.pooler = FirstTokenPooler()
-        self.init_weights()
 
     def get_input_embeddings(self) -> nn.Layer:
         return self.text_model.embeddings.word_embeddings
@@ -407,8 +400,6 @@ class ChineseCLIPVisionModel(ChineseCLIPPretrainedModel):
         super().__init__(config)
 
         self.vision_model = ChineseCLIPVisionTransformer(config)
-
-        self.init_weights()
 
     def get_input_embeddings(self) -> nn.Layer:
         return self.vision_model.conv1
@@ -522,8 +513,6 @@ class ChineseCLIPModel(ChineseCLIPPretrainedModel):
             dtype=paddle.get_default_dtype(),
             default_initializer=nn.initializer.Constant(config.logit_scale_init_value),
         )
-
-        self.init_weights()
 
     def get_text_features(
         self,
@@ -787,6 +776,20 @@ class ChineseCLIPModel(ChineseCLIPPretrainedModel):
         image_embeds = image_embeds / image_embeds.norm(p=2, axis=-1, keepdim=True)
         text_embeds = text_embeds / text_embeds.norm(p=2, axis=-1, keepdim=True)
 
+        if paddle.distributed.is_initialized() and dist.get_world_size() > 1:
+            world_size = dist.get_world_size()
+            rank = dist.get_rank()
+            gathered_image_features = [paddle.zeros_like(image_embeds) for _ in range(world_size)]
+            gathered_text_features = [paddle.zeros_like(text_embeds) for _ in range(world_size)]
+            dist.all_gather(gathered_image_features, image_embeds)
+            dist.all_gather(gathered_text_features, text_embeds)
+            # Add current text_embeds image_embeds into the batch for gradient update
+            image_embeds = paddle.concat(
+                [image_embeds] + gathered_image_features[:rank] + gathered_image_features[rank + 1 :]
+            )
+            text_embeds = paddle.concat(
+                [text_embeds] + gathered_text_features[:rank] + gathered_text_features[rank + 1 :]
+            )
         # cosine similarity as logits
         logit_scale = self.logit_scale.exp()
         logits_per_text = paddle.matmul(text_embeds, image_embeds, transpose_y=True) * logit_scale
@@ -836,8 +839,6 @@ class ChineseCLIPTextModelWithProjection(ChineseCLIPPretrainedModel):
         self.text_projection = paddle.create_parameter(
             (config.hidden_size, config.projection_dim), paddle.get_default_dtype()
         )
-
-        self.init_weights()
 
     def get_input_embeddings(self) -> nn.Layer:
         return self.text_model.embeddings.word_embeddings
@@ -959,8 +960,6 @@ class ChineseCLIPVisionModelWithProjection(ChineseCLIPPretrainedModel):
         self.vision_projection = paddle.create_parameter(
             (config.hidden_size, config.projection_dim), paddle.get_default_dtype()
         )
-
-        self.init_weights()
 
     def get_input_embeddings(self) -> nn.Layer:
         if isinstance(self.vision_model, ChineseCLIPVisionTransformer):

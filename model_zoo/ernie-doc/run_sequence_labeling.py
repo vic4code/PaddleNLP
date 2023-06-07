@@ -13,31 +13,28 @@
 # limitations under the License.
 
 import argparse
-import collections
-from collections import namedtuple, defaultdict
-
 import os
 import random
-from functools import partial
 import time
+from collections import defaultdict
+from functools import partial
 
 import numpy as np
 import paddle
-import paddle.nn as nn
-from paddle.io import DataLoader
+from data import SequenceLabelingIterator
 from paddle.optimizer import AdamW
 
-from paddlenlp.transformers import ErnieDocForTokenClassification
-from paddlenlp.transformers import ErnieDocTokenizer
-from paddlenlp.transformers import LinearDecayWithWarmup
-from paddlenlp.utils.log import logger
 from paddlenlp.datasets import load_dataset
 from paddlenlp.metrics import ChunkEvaluator
 from paddlenlp.ops.optimizer import layerwise_lr_decay
+from paddlenlp.transformers import (
+    ErnieDocForTokenClassification,
+    ErnieDocTokenizer,
+    LinearDecayWithWarmup,
+)
+from paddlenlp.utils.log import logger
 
-from data import SequenceLabelingIterator
-
-# yapf: disable
+# fmt: off
 parser = argparse.ArgumentParser()
 parser.add_argument("--batch_size", default=8, type=int, help="Batch size per GPU/CPU for training.")
 parser.add_argument("--model_name_or_path", type=str, default="ernie-doc-base-zh", help="Pretraining model name or path")
@@ -55,9 +52,8 @@ parser.add_argument("--warmup_proportion", default=0.1, type=float, help="Linear
 parser.add_argument("--dataset", default="msra_ner", choices=["msra_ner"], type=str, help="The training dataset")
 parser.add_argument("--layerwise_decay", default=1.0, type=float, help="Layerwise decay ratio")
 parser.add_argument("--max_steps", default=-1, type=int, help="If > 0: set total number of training steps to perform. Override num_train_epochs.",)
-
-# yapf: enable
 args = parser.parse_args()
+# fmt: on
 
 
 def set_seed(args):
@@ -114,7 +110,7 @@ def evaluate(model, metric, data_loader, memories0):
         preds = paddle.concat(preds_dict[qid], axis=0).unsqueeze(0)
         labels = paddle.concat(labels_dict[qid], axis=0).unsqueeze(0).squeeze(-1)
         length = paddle.concat(length_dict[qid], axis=0)
-        length = length.sum(axis=0)
+        length = length.sum(axis=0, keepdim=True)
         num_infer_chunks, num_label_chunks, num_correct_chunks = metric.compute(length, preds, labels)
         metric.update(num_infer_chunks.numpy(), num_label_chunks.numpy(), num_correct_chunks.numpy())
     precision, recall, f1_score = metric.accumulate()
@@ -181,11 +177,11 @@ def do_train(args):
         no_entity_id=no_entity_id,
     )
 
-    train_dataloader = paddle.io.DataLoader.from_generator(capacity=70, return_list=True)
+    train_dataloader = paddle.fluid.reader.DataLoader.from_generator(capacity=70, return_list=True)
     train_dataloader.set_batch_generator(train_ds_iter, paddle.get_device())
-    eval_dataloader = paddle.io.DataLoader.from_generator(capacity=70, return_list=True)
+    eval_dataloader = paddle.fluid.reader.DataLoader.from_generator(capacity=70, return_list=True)
     eval_dataloader.set_batch_generator(eval_ds_iter, paddle.get_device())
-    test_dataloader = paddle.io.DataLoader.from_generator(capacity=70, return_list=True)
+    test_dataloader = paddle.fluid.reader.DataLoader.from_generator(capacity=70, return_list=True)
     test_dataloader.set_batch_generator(test_ds_iter, paddle.get_device())
 
     num_training_examples = train_ds_iter.get_num_examples()
@@ -297,7 +293,7 @@ def do_train(args):
             break
 
     logger.info("Final test result:")
-    eval_acc = evaluate(model, metric, test_dataloader, create_memory())
+    evaluate(model, metric, test_dataloader, create_memory())
 
 
 if __name__ == "__main__":

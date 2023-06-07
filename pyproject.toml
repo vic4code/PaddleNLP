@@ -10,23 +10,29 @@ exclude = ['.flake8']
 
 [tool.pytest.ini_options]
 minversion = "6.0"
-addopts = "-ra -q"
+addopts = "-ra -q --ignore model_zoo/gpt-3/"
 pythonpath = ["."]
 testpaths = [
     "tests/data",
+    "tests/dataaug",
     "tests/datasets",
     "tests/embeddings",
     "tests/experimental",
+    "tests/layers",
     "tests/metrics",
     "tests/ops",
     "tests/transformers",
+    "tests/peft",
     "tests/prompt",
     "tests/taskflow",
     "tests/utils",
     "model_zoo",
-    "tests/dataaug",
 ]
 python_files = [
     "test.py",
     "test_*.py"
+]
+filterwarnings = [
+    "ignore::UserWarning",
+    'ignore::DeprecationWarning',
 ]

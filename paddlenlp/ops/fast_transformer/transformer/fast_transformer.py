@@ -723,7 +723,7 @@ class TransformerGenerator(paddle.nn.Layer):
 
 class FasterOPT(OPTPretrainedModel):
     def __init__(self, model, decoding_lib=None, use_fp16_decoding=False):
-        super(FasterOPT, self).__init__()
+        super(FasterOPT, self).__init__(model.config)
         self._model = model
         self.use_fp16_decoding = use_fp16_decoding
         self.decoding = InferOptDecoding(model=model, decoding_lib=decoding_lib, use_fp16_decoding=use_fp16_decoding)
@@ -905,17 +905,17 @@ class FasterUnifiedTransformer(UnifiedTransformerPretrainedModel):
         self._model = model
         self._use_fp16_decoding = use_fp16_decoding
         self.vocab_size = model.lm_head.decoder_bias.shape[0]
-        self.unk_token_id = self._model.unk_token_id
-        self.mask_token_id = self._model.mask_token_id
-        self.bos_token_id = self._model.bos_token_id
-        self.pad_token_id = self._model.pad_token_id
+        self.unk_token_id = self._model.config.unk_token_id
+        self.mask_token_id = self._model.config.mask_token_id
+        self.bos_token_id = self._model.config.bos_token_id
+        self.pad_token_id = self._model.config.pad_token_id
         self.logits_mask = self.generate_logits_mask(use_fp16_decoding)
-        self._n_head = self._model.num_attention_heads
-        self._hidden_dims = self._model.hidden_size
-        self._normalize_before = self._model.normalize_before
+        self._n_head = self._model.config.num_attention_heads
+        self._hidden_dims = self._model.config.hidden_size
+        self._normalize_before = self._model.config.normalize_before
         self._size_per_head = self._hidden_dims // self._n_head
-        self._n_layer = self._model.num_hidden_layers
-        self._hidden_act = self._model.hidden_act
+        self._n_layer = self._model.config.num_hidden_layers
+        self._hidden_act = self._model.config.hidden_act
 
         self.decoding = InferUnifiedDecoding(
             model=self._model,
@@ -1108,19 +1108,19 @@ class FasterUNIMOText(UNIMOPretrainedModel):
         super(FasterUNIMOText, self).__init__(model.config)
         self._model = model
         self._use_fp16_decoding = use_fp16_decoding
-        self.unk_token_id = self._model.unk_token_id
-        self.mask_token_id = self._model.mask_token_id
-        self.bos_token_id = self._model.bos_token_id
-        self.pad_token_id = self._model.pad_token_id
+        self.unk_token_id = self._model.config.unk_token_id
+        self.mask_token_id = self._model.config.mask_token_id
+        self.bos_token_id = self._model.config.bos_token_id
+        self.pad_token_id = self._model.config.pad_token_id
         self.vocab_size = model.lm_head.decoder_bias.shape[0]
 
         self.logits_mask = self.generate_logits_mask(use_fp16_decoding)
-        self._n_head = self._model.num_attention_heads
-        self._hidden_dims = self._model.hidden_size
-        self._normalize_before = self._model.normalize_before
+        self._n_head = self._model.config.num_attention_heads
+        self._hidden_dims = self._model.config.hidden_size
+        self._normalize_before = self._model.config.normalize_before
         self._size_per_head = self._hidden_dims // self._n_head
-        self._n_layer = self._model.num_hidden_layers
-        self._hidden_act = self._model.hidden_act
+        self._n_layer = self._model.config.num_hidden_layers
+        self._hidden_act = self._model.config.hidden_act
         self.trans_out = kwargs.get("trans_out", False)
 
         self.decoding = InferUnifiedDecoding(
@@ -1279,19 +1279,19 @@ class FasterMIRO(UNIMOPretrainedModel):
         super(FasterMIRO, self).__init__(model.config)
         self._model = model
         self._use_fp16_decoding = use_fp16_decoding
-        self.unk_token_id = self._model.unk_token_id
-        self.mask_token_id = self._model.mask_token_id
-        self.bos_token_id = self._model.bos_token_id
-        self.pad_token_id = self._model.pad_token_id
+        self.unk_token_id = self._model.config.unk_token_id
+        self.mask_token_id = self._model.config.mask_token_id
+        self.bos_token_id = self._model.config.bos_token_id
+        self.pad_token_id = self._model.config.pad_token_id
         self.vocab_size = model.lm_head.decoder_bias.shape[0]
 
         self.logits_mask = self.generate_logits_mask(use_fp16_decoding)
-        self._n_head = self._model.num_attention_heads
-        self._hidden_dims = self._model.hidden_size
-        self._normalize_before = self._model.normalize_before
+        self._n_head = self._model.config.num_attention_heads
+        self._hidden_dims = self._model.config.hidden_size
+        self._normalize_before = self._model.config.normalize_before
         self._size_per_head = self._hidden_dims // self._n_head
-        self._n_layer = self._model.num_hidden_layers
-        self._hidden_act = self._model.hidden_act
+        self._n_layer = self._model.config.num_hidden_layers
+        self._hidden_act = self._model.config.hidden_act
         self.trans_out = kwargs.get("trans_out", False)
 
         self.decoding = InferMIRODecoding(
@@ -1483,12 +1483,14 @@ class FasterBART(BartPretrainedModel):
         num_beams=4,
         top_k=1,
         top_p=0.0,
+        temperature=1.0,
         decode_strategy="beam_search",
         bos_token_id=None,
         eos_token_id=None,
         pad_token_id=None,
         decoder_start_token_id=None,
-        max_length=256,
+        min_length=0,
+        max_length=20,
         diversity_rate=0.0,
         length_penalty=0.6,
         num_return_sequences=1,
@@ -1521,6 +1523,7 @@ class FasterBART(BartPretrainedModel):
             seq_len = expanded_kwargs["seq_len"]
         if decoder_start_token_id is not None:
             bos_token_id = decoder_start_token_id
+
         return self.decoding(
             enc_output=encoder_output,
             memory_seq_lens=seq_len,
@@ -1532,6 +1535,8 @@ class FasterBART(BartPretrainedModel):
             pad_token_id=pad_token_id,
             top_p=top_p,
             max_out_len=max_length,
+            min_out_len=min_length,
+            temperature=temperature,
             diversity_rate=diversity_rate,
             alpha=length_penalty,
             early_stopping=early_stopping,
@@ -1670,7 +1675,7 @@ class FasterMBART(MBartPretrainedModel):
 
 class FasterGPTJ(GPTJPretrainedModel):
     def __init__(self, model, decoding_lib=None, use_fp16_decoding=False):
-        super(FasterGPTJ, self).__init__()
+        super(FasterGPTJ, self).__init__(model.config)
         self._model = model
         self.use_fp16_decoding = use_fp16_decoding
         self.decoding = InferGptJDecoding(model=model, decoding_lib=decoding_lib, use_fp16_decoding=use_fp16_decoding)
@@ -1802,7 +1807,7 @@ class FasterPegasus(PegasusPretrainedModel):
     enable_faster_encoder_func = enable_fast_encoder
 
     def __init__(self, model, decoding_lib=None, use_fp16_decoding=False, enable_fast_encoder=False, **kwargs):
-        super(FasterPegasus, self).__init__()
+        super(FasterPegasus, self).__init__(model.config)
         self.use_fp16_decoding = use_fp16_decoding
         self._model = model
         self.encoder = model.get_encoder()

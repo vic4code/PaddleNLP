@@ -242,7 +242,7 @@ class MT5ModelTester:
         self.parent.assertEqual(len(outputs), 4 if self.parent.use_labels else 3)
         if self.parent.use_labels:
             self.parent.assertEqual(outputs[1].shape, [self.batch_size, self.decoder_seq_length, self.vocab_size])
-            self.parent.assertEqual(outputs[0].shape, [1])
+            self.parent.assertIsInstance(outputs[0].item(), float)
         else:
             self.parent.assertEqual(outputs[0].shape, [self.batch_size, self.decoder_seq_length, self.vocab_size])
 
@@ -489,6 +489,7 @@ class MT5ModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase):
     test_model_parallel = True
     use_test_inputs_embeds = True
     is_encoder_decoder = True
+    use_test_model_name_list = False
     # The small MT5 model needs higher percentages for CPU/MP tests
     model_split_percents = [0.8, 0.9]
 

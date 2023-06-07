@@ -17,8 +17,9 @@ import os
 
 from paddle.dataset.common import md5file
 from paddle.utils.download import get_path_from_url
-from paddlenlp.utils.env import DATA_HOME
-from . import DatasetBuilder
+
+from ..utils.env import DATA_HOME
+from .dataset import DatasetBuilder
 
 __all__ = ["NLPCC_DBQA"]
 
@@ -29,10 +30,10 @@ class NLPCC_DBQA(DatasetBuilder):
 
     Document-based QA (or DBQA) task
     When predicting answers to each question, a DBQA system built by each
-    participating team IS LIMITED TO select sentences as answersfrom the
+    participating team IS LIMITED TO select sentences as answers from the
     question’s given document.
 
-    For more imformation: http://tcci.ccf.org.cn/conference/2016/dldoc/evagline2.pdf
+    For more information: http://tcci.ccf.org.cn/conference/2016/dldoc/evagline2.pdf
     """
 
     URL = "https://bj.bcebos.com/paddlenlp/datasets/nlpcc-dbqa.zip"

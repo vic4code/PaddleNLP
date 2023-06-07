@@ -14,47 +14,44 @@
 # limitations under the License.
 
 from __future__ import annotations
-from typing import Dict, List, Optional, Any, Union
 
-import copy
-import json
 import inspect
 import logging
 import traceback
-import numpy as np
-import pandas as pd
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
+
 import networkx as nx
-from pandas.core.frame import DataFrame
 import yaml
 from networkx import DiGraph
 from networkx.drawing.nx_agraph import to_agraph
+from pandas.core.frame import DataFrame
 
 from pipelines.pipelines.config import (
     get_component_definitions,
     get_pipeline_definition,
     read_pipeline_config_from_yaml,
 )
-from pipelines.schema import Document, Label, MultiLabel
 from pipelines.pipelines.utils import generate_code
+from pipelines.schema import ContentTypes, Document, MultiLabel
 
 try:
-    from ray import serve
     import ray
-except:
+    from ray import serve
+except Exception:
     ray = None  # type: ignore
     serve = None  # type: ignore
 
 try:
     from pipelines import __version__
-except:
+except Exception:
     # For development
     __version__ = "0.0.0"
 
-from pipelines.schema import Document
-from pipelines.nodes.base import BaseComponent
-from pipelines.nodes.retriever.base import BaseRetriever
+
+from pipelines.nodes.base import BaseComponent  # isort: skip
 from pipelines.document_stores.base import BaseDocumentStore
+from pipelines.nodes.retriever.base import BaseRetriever
 
 logger = logging.getLogger(__name__)
 
@@ -258,8 +255,6 @@ class BasePipeline:
                                              `_` sign must be used to specify nested hierarchical properties.
         """
         pipeline_config = read_pipeline_config_from_yaml(path)
-        print(pipeline_config)
-        print(pipeline_name)
         if pipeline_config["version"] != __version__:
             logger.warning(
                 f"YAML version ({pipeline_config['version']}) does not match with pipelines version ({__version__}). "
@@ -369,6 +364,7 @@ class Pipeline(BasePipeline):
     def run(  # type: ignore
         self,
         query: Optional[str] = None,
+        history: Optional[Dict[str, str]] = None,
         file_paths: Optional[List[str]] = None,
         labels: Optional[MultiLabel] = None,
         documents: Optional[List[Document]] = None,
@@ -418,6 +414,8 @@ class Pipeline(BasePipeline):
         }  # ordered dict with "node_id" -> "input" mapping that acts as a FIFO queue
         if query:
             queue[self.root_node]["query"] = query
+        if history:
+            queue[self.root_node]["history"] = history
         if file_paths:
             queue[self.root_node]["file_paths"] = file_paths
         if labels:
@@ -478,6 +476,8 @@ class Pipeline(BasePipeline):
                                     updated_input["documents"] = documents
                                 if meta:
                                     updated_input["meta"] = meta
+                                if history:
+                                    updated_input["history"] = history
                             else:
                                 existing_input["inputs"].append(node_output)
                                 updated_input = existing_input
@@ -492,6 +492,7 @@ class Pipeline(BasePipeline):
     def run_batch(  # type: ignore
         self,
         queries: List[str] = None,
+        queries_type: Optional[ContentTypes] = None,
         file_paths: Optional[List[str]] = None,
         labels: Optional[Union[MultiLabel, List[MultiLabel]]] = None,
         documents: Optional[Union[List[Document], List[List[Document]]]] = None,
@@ -694,15 +695,6 @@ class Pipeline(BasePipeline):
 
         :param path: the path to save the image.
         """
-        try:
-            import pygraphviz
-        except ImportError:
-            raise ImportError(
-                f"Could not import `pygraphviz`. Please install via: \n"
-                f"pip install pygraphviz\n"
-                f"(You might need to run this first: apt install libgraphviz-dev graphviz )"
-            )
-
         graphviz = to_agraph(self.graph)
         graphviz.layout("dot")
         graphviz.draw(path)
@@ -762,13 +754,9 @@ class Pipeline(BasePipeline):
         )
 
         pipeline = cls()
-        print(pipeline_definition)
         components: dict = {}  # instances of component objects.
         for node in pipeline_definition["nodes"]:
-            print("node", node)
             name = node["name"]
-            if name == "QAFilterPostprocessor":
-                print("exit")
             component = cls._load_or_get_component(name=name, definitions=component_definitions, components=components)
             pipeline.add_node(component=component, name=name, inputs=node.get("inputs", []))
 

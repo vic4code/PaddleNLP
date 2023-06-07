@@ -13,22 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import random
+import tempfile
 import unittest
-from parameterized import parameterized_class
+
+import numpy as np
 import paddle
 from paddle import Tensor
+from parameterized import parameterized, parameterized_class
 
 from paddlenlp.transformers import (
-    AlbertPretrainedModel,
+    AlbertConfig,
     AlbertForMaskedLM,
     AlbertForMultipleChoice,
     AlbertForQuestionAnswering,
     AlbertForSequenceClassification,
     AlbertForTokenClassification,
     AlbertModel,
+    AlbertPretrainedModel,
 )
-from ..test_modeling_common import ids_tensor, random_attention_mask, ModelTesterMixin
-from ...testing_utils import slow
+
+from ...testing_utils import require_package, slow
+from ..test_modeling_common import ModelTesterMixin, ids_tensor, random_attention_mask
 
 
 class AlbertModelTester:
@@ -62,7 +68,7 @@ class AlbertModelTester:
         self.eos_token_id = (3,)
         self.add_pooling_layer = True
         self.type_sequence_label_size = 2
-        self.num_classes = 3
+        self.num_labels = 3
         self.num_choices = 4
         self.scope = None
 
@@ -83,27 +89,29 @@ class AlbertModelTester:
 
         if self.parent.use_labels:
             sequence_labels = ids_tensor([self.batch_size], self.type_sequence_label_size)
-            token_labels = ids_tensor([self.batch_size, self.seq_length], self.num_classes)
+            token_labels = ids_tensor([self.batch_size, self.seq_length], self.num_labels)
             choice_labels = ids_tensor([self.batch_size], self.num_choices)
 
         config = self.get_config()
         return config, input_ids, token_type_ids, input_mask, sequence_labels, token_labels, choice_labels
 
     def get_config(self):
-        return {
-            "vocab_size": self.vocab_size,
-            "hidden_size": self.hidden_size,
-            "num_hidden_layers": self.num_hidden_layers,
-            "num_attention_heads": self.num_attention_heads,
-            "intermediate_size": self.intermediate_size,
-            "hidden_act": self.hidden_act,
-            "hidden_dropout_prob": self.hidden_dropout_prob,
-            "attention_probs_dropout_prob": self.attention_probs_dropout_prob,
-            "max_position_embeddings": self.max_position_embeddings,
-            "type_vocab_size": self.type_vocab_size,
-            "initializer_range": self.initializer_range,
-            "num_hidden_groups": self.num_hidden_groups,
-        }
+        return AlbertConfig(
+            vocab_size=self.vocab_size,
+            hidden_size=self.hidden_size,
+            num_hidden_layers=self.num_hidden_layers,
+            num_attention_heads=self.num_attention_heads,
+            intermediate_size=self.intermediate_size,
+            hidden_act=self.hidden_act,
+            hidden_dropout_prob=self.hidden_dropout_prob,
+            attention_probs_dropout_prob=self.attention_probs_dropout_prob,
+            max_position_embeddings=self.max_position_embeddings,
+            type_vocab_size=self.type_vocab_size,
+            initializer_range=self.initializer_range,
+            num_hidden_groups=self.num_hidden_groups,
+            num_labels=self.num_labels,
+            num_choices=self.num_choices,
+        )
 
     def create_and_check_model(
         self,
@@ -115,7 +123,7 @@ class AlbertModelTester:
         token_labels: Tensor,
         choice_labels: Tensor,
     ):
-        model = AlbertModel(**config)
+        model = AlbertModel(config)
         model.eval()
         result = model(
             input_ids, attention_mask=input_mask, token_type_ids=token_type_ids, return_dict=self.parent.return_dict
@@ -135,7 +143,7 @@ class AlbertModelTester:
         token_labels: Tensor,
         choice_labels: Tensor,
     ):
-        model = AlbertForMaskedLM(AlbertModel(**config))
+        model = AlbertForMaskedLM(config)
         model.eval()
         result = model(
             input_ids,
@@ -163,7 +171,7 @@ class AlbertModelTester:
         token_labels: Tensor,
         choice_labels: Tensor,
     ):
-        model = AlbertForQuestionAnswering(AlbertModel(**config))
+        model = AlbertForQuestionAnswering(config)
         model.eval()
         result = model(
             input_ids,
@@ -192,7 +200,7 @@ class AlbertModelTester:
         token_labels: Tensor,
         choice_labels: Tensor,
     ):
-        model = AlbertForSequenceClassification(AlbertModel(**config), num_classes=self.num_classes)
+        model = AlbertForSequenceClassification(config)
         model.eval()
         result = model(
             input_ids,
@@ -208,7 +216,7 @@ class AlbertModelTester:
             result = result[1:]
         elif paddle.is_tensor(result):
             result = [result]
-        self.parent.assertEqual(result[0].shape, [self.batch_size, self.num_classes])
+        self.parent.assertEqual(result[0].shape, [self.batch_size, self.num_labels])
 
     def create_and_check_for_token_classification(
         self,
@@ -220,7 +228,7 @@ class AlbertModelTester:
         token_labels: Tensor,
         choice_labels: Tensor,
     ):
-        model = AlbertForTokenClassification(AlbertModel(**config), num_classes=self.num_classes)
+        model = AlbertForTokenClassification(config)
         model.eval()
         result = model(
             input_ids,
@@ -238,7 +246,7 @@ class AlbertModelTester:
         elif paddle.is_tensor(result):
             result = [result]
 
-        self.parent.assertEqual(result[0].shape, [self.batch_size, self.seq_length, self.num_classes])
+        self.parent.assertEqual(result[0].shape, [self.batch_size, self.seq_length, self.num_labels])
 
     def create_and_check_for_multiple_choice(
         self,
@@ -250,7 +258,7 @@ class AlbertModelTester:
         token_labels: Tensor,
         choice_labels: Tensor,
     ):
-        model = AlbertForMultipleChoice(AlbertModel(**config))
+        model = AlbertForMultipleChoice(config)
         model.eval()
         multiple_choice_inputs_ids = input_ids.unsqueeze(1).expand([-1, self.num_choices, -1])
         multiple_choice_token_type_ids = token_type_ids.unsqueeze(1).expand([-1, self.num_choices, -1])
@@ -291,6 +299,7 @@ class AlbertModelTest(ModelTesterMixin, unittest.TestCase):
     base_model_class = AlbertModel
     use_labels = False
     return_dict = False
+    test_tie_weights = True
 
     all_model_classes = (
         AlbertModel,
@@ -331,6 +340,148 @@ class AlbertModelTest(ModelTesterMixin, unittest.TestCase):
             self.assertIsNotNone(model)
 
 
+class AlbertModelCompatibilityTest(unittest.TestCase):
+    model_id = "hf-internal-testing/tiny-random-AlbertModel"
+
+    @require_package("transformers", "torch")
+    def test_albert_converter(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            # 1. create input
+            input_ids = np.random.randint(100, 200, [1, 20])
+
+            # 2. forward the paddle model
+            from paddlenlp.transformers import AlbertModel
+
+            paddle_model = AlbertModel.from_pretrained(self.model_id, from_hf_hub=True, cache_dir=tempdir)
+            paddle_model.eval()
+            paddle_logit = paddle_model(paddle.to_tensor(input_ids))[0]
+
+            # 3. forward the torch model
+            import torch
+            from transformers import AlbertModel
+
+            torch_model = AlbertModel.from_pretrained(self.model_id, cache_dir=tempdir)
+            torch_model.eval()
+            torch_logit = torch_model(torch.tensor(input_ids), return_dict=False)[0]
+
+            # 4. compare results
+            self.assertTrue(
+                np.allclose(
+                    paddle_logit.detach().cpu().reshape([-1])[:9].numpy(),
+                    torch_logit.detach().cpu().reshape([-1])[:9].numpy(),
+                    rtol=1e-4,
+                )
+            )
+
+    @require_package("transformers", "torch")
+    def test_albert_converter_from_local_dir_with_enable_torch(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            # 1. forward the torch  model
+            from transformers import AlbertModel
+
+            torch_model = AlbertModel.from_pretrained(self.model_id)
+            torch_model.save_pretrained(tempdir)
+
+            # 2. forward the paddle model
+            from paddlenlp.transformers import AlbertModel, model_utils
+
+            model_utils.ENABLE_TORCH_CHECKPOINT = False
+
+            with self.assertRaises(ValueError) as error:
+                AlbertModel.from_pretrained(tempdir)
+                self.assertIn("conversion is been disabled" in str(error.exception))
+            model_utils.ENABLE_TORCH_CHECKPOINT = True
+
+    @require_package("transformers", "torch")
+    def test_albert_converter_from_local_dir(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+
+            # 1. create commmon input
+            input_ids = np.random.randint(100, 200, [1, 20])
+
+            # 2. forward the torch  model
+            import torch
+            from transformers import AlbertModel
+
+            torch_model = AlbertModel.from_pretrained(self.model_id)
+            torch_model.eval()
+            torch_model.save_pretrained(tempdir)
+            torch_logit = torch_model(torch.tensor(input_ids), return_dict=False)[0]
+
+            # 2. forward the paddle model
+            from paddlenlp.transformers import AlbertModel
+
+            paddle_model = AlbertModel.from_pretrained(tempdir)
+            paddle_model.eval()
+            paddle_logit = paddle_model(paddle.to_tensor(input_ids))[0]
+
+            self.assertTrue(
+                np.allclose(
+                    paddle_logit.detach().cpu().reshape([-1])[:9].numpy(),
+                    torch_logit.detach().cpu().reshape([-1])[:9].numpy(),
+                    rtol=1e-4,
+                )
+            )
+
+    @parameterized.expand(
+        [
+            ("AlbertModel",),
+            # ("AlbertForMaskedLM",),   TODO: need to tie weights
+            # ("AlbertForPretraining",),   TODO: need to tie weights
+            ("AlbertForMultipleChoice",),
+            ("AlbertForQuestionAnswering",),
+            ("AlbertForSequenceClassification",),
+            ("AlbertForTokenClassification",),
+        ]
+    )
+    @require_package("transformers", "torch")
+    def test_albert_classes_from_local_dir(self, class_name, pytorch_class_name=None):
+        pytorch_class_name = pytorch_class_name or class_name
+        with tempfile.TemporaryDirectory() as tempdir:
+
+            # 1. create commmon input
+            input_ids = np.random.randint(100, 200, [1, 20])
+
+            # 2. forward the torch model
+            import torch
+            import transformers
+
+            torch_model_class = getattr(transformers, pytorch_class_name)
+            torch_model = torch_model_class.from_pretrained(self.model_id)
+            torch_model.eval()
+
+            if "MultipleChoice" in class_name:
+                # construct input for MultipleChoice Model
+                torch_model.config.num_choices = random.randint(2, 10)
+                input_ids = (
+                    paddle.to_tensor(input_ids)
+                    .unsqueeze(1)
+                    .expand([-1, torch_model.config.num_choices, -1])
+                    .cpu()
+                    .numpy()
+                )
+
+            torch_model.save_pretrained(tempdir)
+            torch_logit = torch_model(torch.tensor(input_ids), return_dict=False)[0]
+
+            # 3. forward the paddle model
+            from paddlenlp import transformers
+
+            paddle_model_class = getattr(transformers, class_name)
+            paddle_model = paddle_model_class.from_pretrained(tempdir)
+            paddle_model.eval()
+
+            paddle_logit = paddle_model(paddle.to_tensor(input_ids), return_dict=False)[0]
+
+            self.assertTrue(
+                np.allclose(
+                    paddle_logit.detach().cpu().reshape([-1])[:9].numpy(),
+                    torch_logit.detach().cpu().reshape([-1])[:9].numpy(),
+                    atol=1e-3,
+                )
+            )
+
+
 class AlbertModelIntegrationTest(unittest.TestCase):
     @slow
     def test_inference_no_head_absolute_embedding(self):
@@ -344,5 +495,4 @@ class AlbertModelIntegrationTest(unittest.TestCase):
         expected_slice = paddle.to_tensor(
             [[[-0.6513, 1.5035, -0.2766], [-0.6515, 1.5046, -0.2780], [-0.6512, 1.5049, -0.2784]]]
         )
-
         self.assertTrue(paddle.allclose(output[:, 1:4, 1:4], expected_slice, atol=1e-4))

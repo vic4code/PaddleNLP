@@ -27,6 +27,11 @@ from .modules.lr_scheduler import *  # noqa: F403
 from .modules.optimizer import *  # noqa: F403
 from .modules.rnnlm import RNNLMBenchmark
 from .modules.seq2seq import Seq2SeqBenchmark
+
+try:
+    from .modules.stablediffusion import StableDiffusionBenchmark
+except Exception:
+    StableDiffusionBenchmark = None
 from .modules.t5_for_conditional_generation import T5ForConditionalGenerationBenchmark
 from .modules.xlnet import XLNetBenchmark
 
@@ -48,6 +53,7 @@ MODEL_REGISTRY = {
     "bert_for_question_answering": BertForQuestionAnsweringBenchmark,
     "gpt_for_sequence_classification": GPTForSequenceClassificationBenchmark,
     "t5_for_conditional_generation": T5ForConditionalGenerationBenchmark,
+    "stablediffusion": StableDiffusionBenchmark,
 }
 
 OPTIMIZER_REGISTRY = {
@@ -126,6 +132,7 @@ def get_parser():
     parser.add_argument("--use_amp", type=str2bool, nargs="?", const=False, help="Enable AMP. ")
     parser.add_argument("--scale_loss", type=float, default=128, help="Loss scale. ")
     parser.add_argument("--amp_level", type=str, default="O2", help="AMP LEVEL. O1 or O2. ")
+    parser.add_argument("--amp_use_promote", action="store_true", help="Enable kernel promotion for AMP training. ")
     parser.add_argument("--custom_black_list", type=str, nargs="+", default=None, help="Custom black list for AMP. ")
 
     parser.add_argument("--to_static", action="store_true", help="Enable to static. ")
@@ -134,6 +141,12 @@ def get_parser():
     parser.add_argument("--epoch", type=int, default=10, help="Number of epochs. ")
 
     parser.add_argument("--generated_inputs", action="store_true", help="Use generated inputs. ")
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="num_workers of dataloader. When paddlepaddle<=2.4.1, if we use dynamicTostatic mode, we need set num_workeks > 0 ",
+    )
 
     # For benchmark.
     parser.add_argument(

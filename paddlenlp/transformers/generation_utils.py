@@ -12,20 +12,67 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import inspect
 from abc import ABC
-from typing import List
+from typing import List, Union
 
 import paddle
 import paddle.nn as nn
 import paddle.nn.functional as F
+from paddle import Tensor
 from paddle.common_ops_import import convert_dtype
-from paddle.fluid.layers.utils import map_structure
+
+try:
+    from paddle.utils import map_structure
+except ImportError:
+    from paddle.fluid.layers.utils import map_structure
+
+from paddle.fluid.dygraph.base import in_declarative_mode
 
 from paddlenlp.utils.log import logger
 
+from .model_outputs import ModelOutput
+
 __all__ = ["GenerationMixin"]
+
+
+def get_unfinished_flag(
+    input_ids: Tensor, unfinished_flag: Tensor, eos_token_id: Union[int, list[int], list[list[int]]]
+) -> Tensor:
+    """get unfinished flag for generation step
+
+    Args:
+        input_ids (Tensor): the input_ids
+        eos_token_id (Union[int, list[int], list[list[int]]]): the end os sentence flag, which can be:
+            * single token id, eg: 10
+            * multiple token ids to stop generation, eg: [10, 10]
+            * some more tokens to stop generations, eg: [[10], [20, 20], [30, 30, 30]]
+
+    Returns:
+        Tensor: the unfinished flag tensor
+    """
+    if isinstance(eos_token_id, int):
+        unfinished_flag = paddle.logical_and(unfinished_flag, input_ids[:, -1:] != eos_token_id)
+    elif isinstance(eos_token_id[0], int):
+        eos_token_id_tensor = paddle.to_tensor([eos_token_id])
+        is_last_tokens_equal = paddle.all(
+            paddle.equal(input_ids[:, -len(eos_token_id) :], eos_token_id_tensor), axis=-1
+        ).unsqueeze(-1)
+        unfinished_flag = paddle.logical_and(unfinished_flag, ~is_last_tokens_equal)
+    else:
+        batch_unfinish_flag = None
+        for batch_eos_token_id in eos_token_id:
+            if batch_unfinish_flag is None:
+                batch_unfinish_flag = ~get_unfinished_flag(input_ids, unfinished_flag, batch_eos_token_id)
+            else:
+                batch_unfinish_flag = paddle.logical_or(
+                    batch_unfinish_flag, ~get_unfinished_flag(input_ids, unfinished_flag, batch_eos_token_id)
+                )
+
+        unfinished_flag = ~batch_unfinish_flag
+    return unfinished_flag
 
 
 class BeamHypotheses:
@@ -347,7 +394,9 @@ class GenerationMixin(object):
     @staticmethod
     def expand_inputs_for_generation(input_ids, expand_size, attention_mask=None, **model_kwargs):
 
-        index = paddle.tile(paddle.arange(paddle.shape(input_ids)[0]).unsqueeze(-1), [1, expand_size]).reshape([-1])
+        index = paddle.tile(
+            paddle.arange(paddle.shape(input_ids)[0], dtype="int64").unsqueeze(-1), [1, expand_size]
+        ).reshape([-1])
 
         input_ids = paddle.gather(input_ids, index)
 
@@ -387,6 +436,11 @@ class GenerationMixin(object):
         # update cache
         if isinstance(outputs, tuple) and len(outputs) > 1 and not isinstance(outputs[1], paddle.Tensor):
             model_kwargs["cache"] = outputs[1]
+            model_kwargs["past_key_values"] = outputs[1]
+
+        if isinstance(outputs, ModelOutput) and "past_key_values" in outputs:
+            model_kwargs["cache"] = outputs.past_key_values
+            model_kwargs["past_key_values"] = outputs.past_key_values
 
         # update token_type_ids with last value
         if "token_type_ids" in model_kwargs and model_kwargs["token_type_ids"] is not None:
@@ -396,7 +450,7 @@ class GenerationMixin(object):
         # update position_ids
         if "position_ids" in model_kwargs and model_kwargs["position_ids"] is not None:
             position_ids = model_kwargs["position_ids"]
-            model_kwargs["position_ids"] = paddle.concat([position_ids, position_ids[:, -1:] + 1], axis=-1)
+            model_kwargs["position_ids"] = paddle.concat([position_ids, position_ids[..., -1:] + 1], axis=-1)
 
         # update attention_mask
         if not is_encoder_decoder and "attention_mask" in model_kwargs:
@@ -405,8 +459,14 @@ class GenerationMixin(object):
             if convert_dtype(attention_mask.dtype) == "bool":
                 attention_mask = paddle.cast(attention_mask, "int64")
             if len(attention_mask.shape) == 4:
-                attention_mask = nn.Pad2D([0, 0, 0, 1], mode="replicate")(attention_mask)
-                attention_mask = nn.Pad2D([0, 1, 0, 0], value=-1e4)(attention_mask)
+                cur_device = paddle.get_device()
+                if cur_device.split(":")[0] == "npu":
+                    attention_mask = nn.Pad2D([0, 0, 0, 1], mode="constant")(attention_mask)
+                    attention_mask = nn.Pad2D([0, 1, 0, 0], value=0)(attention_mask)
+                else:
+                    attention_mask = nn.Pad2D([0, 0, 0, 1], mode="replicate")(attention_mask)
+                    attention_mask = nn.Pad2D([0, 1, 0, 0], value=-1e4)(attention_mask)
+
                 dtype = convert_dtype(attention_mask.dtype)
                 if "int" in dtype:
                     attention_mask[:, :, -1, -1] = 1
@@ -446,16 +506,16 @@ class GenerationMixin(object):
                     argument.startswith("decoder_") or argument.startswith("cross_attn") or argument == "use_cache"
                 )
             }
-
-            model_kwargs["encoder_output"] = encoder(input_ids, **encoder_kwargs)
-
+            # Use inputs_embeds as the priority if inputs_embeds exists
+            if "inputs_embeds" in encoder_kwargs:
+                model_kwargs["encoder_output"] = encoder(**encoder_kwargs)
+            else:
+                model_kwargs["encoder_output"] = encoder(input_ids=input_ids, **encoder_kwargs)
         return model_kwargs
 
     def prepare_decoder_input_ids_for_generation(self, input_ids, decoder_start_token_id=None, bos_token_id=None):
         decoder_start_token_id = (
-            decoder_start_token_id
-            if decoder_start_token_id is not None
-            else getattr(self, "decoder_start_token_id", None)
+            decoder_start_token_id if decoder_start_token_id is not None else self.config.decoder_start_token_id
         )
         decoder_start_token_id = decoder_start_token_id if decoder_start_token_id is not None else bos_token_id
 
@@ -465,22 +525,18 @@ class GenerationMixin(object):
 
     def get_decoder_start_token_id(self, decoder_start_token_id=None, bos_token_id=None):
         decoder_start_token_id = (
-            decoder_start_token_id
-            if decoder_start_token_id is not None
-            else getattr(self, self.base_model_prefix).config.get("decoder_start_token_id", None)
+            decoder_start_token_id if decoder_start_token_id is not None else self.config.decoder_start_token_id
         )
-        bos_token_id = (
-            bos_token_id if bos_token_id is not None else getattr(self, self.base_model_prefix).config["bos_token_id"]
-        )
+        bos_token_id = bos_token_id if bos_token_id is not None else self.config.bos_token_id
 
         if decoder_start_token_id is not None:
             return decoder_start_token_id
-        elif getattr(self, self.base_model_prefix).config.get("decoder_start_token_id", None) is not None:
-            return getattr(self, self.base_model_prefix).config["decoder_start_token_id"]
+        elif self.config.decoder_start_token_id is not None:
+            return self.config.decoder_start_token_id
         elif bos_token_id is not None:
             return bos_token_id
-        elif getattr(self, self.base_model_prefix).config["bos_token_id"] is not None:
-            return getattr(self, self.base_model_prefix).config["bos_token_id"]
+        elif self.config.bos_token_id is not None:
+            return self.config.bos_token_id
         raise ValueError(
             "`decoder_start_token_id` or `bos_token_id` has to be defined for encoder-decoder generation."
         )
@@ -520,6 +576,8 @@ class GenerationMixin(object):
     def generate(
         self,
         input_ids=None,
+        attention_mask=None,
+        position_ids=None,
         max_length=20,
         min_length=0,
         decode_strategy="greedy_search",
@@ -713,7 +771,6 @@ class GenerationMixin(object):
                 print(response)
                 # ['是的', '嗯嗯']
         """
-
         assert decode_strategy in [
             "greedy_search",
             "sampling",
@@ -721,6 +778,16 @@ class GenerationMixin(object):
         ], "`decode_strategy` must be one of 'greedy_search', 'sampling' or 'beam_search' but received {}.".format(
             decode_strategy
         )
+
+        # Whether to dynamic to static
+        is_tracing = False
+        if in_declarative_mode():
+            is_tracing = True
+
+        if is_tracing:
+            assert decode_strategy in [
+                "sampling",
+            ], "`generate()` only supports 'sampling' temporarily but received {}.".format(decode_strategy)
 
         if getattr(self, "deprecated_warnings", None) is None:
             self.deprecated_warnings = {}
@@ -731,24 +798,24 @@ class GenerationMixin(object):
                 logger.warning("`use_faster` will be deprecated in near future. Please use `use_fast` instead. ")
                 self.deprecated_warnings["use_faster"] = True
 
-        # TODO: change from model.attribute to model.config.attribute when all models are integrated with PretrainedConfig
-        bos_token_id = bos_token_id if bos_token_id is not None else getattr(self, "bos_token_id", None)
-        eos_token_id = eos_token_id if eos_token_id is not None else getattr(self, "eos_token_id", None)
-        pad_token_id = pad_token_id if pad_token_id is not None else getattr(self, "pad_token_id", None)
+        bos_token_id = bos_token_id if bos_token_id is not None else self.config.bos_token_id
+        eos_token_id = eos_token_id if eos_token_id is not None else self.config.eos_token_id
+        pad_token_id = pad_token_id if pad_token_id is not None else self.config.pad_token_id
         forced_bos_token_id = (
-            forced_bos_token_id if forced_bos_token_id is not None else getattr(self, "forced_bos_token_id", None)
+            forced_bos_token_id if forced_bos_token_id is not None else self.config.forced_bos_token_id
         )
         forced_eos_token_id = (
-            forced_eos_token_id if forced_eos_token_id is not None else getattr(self, "forced_eos_token_id", None)
+            forced_eos_token_id if forced_eos_token_id is not None else self.config.forced_eos_token_id
         )
         decoder_start_token_id = (
-            decoder_start_token_id
-            if decoder_start_token_id is not None
-            else getattr(self, "decoder_start_token_id", None)
+            decoder_start_token_id if decoder_start_token_id is not None else self.config.decoder_start_token_id
         )
         no_repeat_ngram_size = (
-            no_repeat_ngram_size if no_repeat_ngram_size is not None else getattr(self, "no_repeat_ngram_size", None)
+            no_repeat_ngram_size if no_repeat_ngram_size is not None else self.config.no_repeat_ngram_size
         )
+
+        if is_tracing:
+            self._fast_entry = None
 
         if getattr(self, "_fast_entry", None) is not False and use_fast:
             args = locals()
@@ -785,9 +852,19 @@ class GenerationMixin(object):
                 logger.warning("FastGeneration is not available, " "and the original version would be used instead.")
 
         # params check
-        if input_ids is None:
+        if input_ids is None and "inputs_embeds" not in model_kwargs:
             # Init `input_ids` with bos_token_id
             input_ids = self.prepare_input_ids_for_generation(bos_token_id)
+        elif "inputs_embeds" in model_kwargs:
+            # Add input embeds support
+            input_ids = self.prepare_input_ids_for_generation(
+                bos_token_id, encoder_output=model_kwargs["inputs_embeds"]
+            )
+
+        # Add to model_kwargs
+        model_kwargs["attention_mask"] = attention_mask
+        if position_ids is not None:
+            model_kwargs["position_ids"] = position_ids
 
         if model_kwargs.get("attention_mask", None) is None:
             # TODO
@@ -812,13 +889,20 @@ class GenerationMixin(object):
             pad_token_id = eos_token_id
 
         model_kwargs["use_cache"] = use_cache
-        max_length += input_ids.shape[-1]
-        generate_min_length = min_length
-        min_length += input_ids.shape[-1]
+
+        if is_tracing:
+            min_len = input_ids.shape[-1]
+            max_len = input_ids.shape[-1]
+            paddle.increment(min_len, min_length)
+            paddle.increment(max_len, max_length)
+        else:
+            input_len = input_ids.shape[-1]
+            min_len = input_len + min_length
+            max_len = input_len + max_length
 
         logits_processors = self.get_logits_processor(
-            min_length=min_length if generate_min_length > 0 else None,
-            max_length=max_length,
+            min_length=min_len if min_length > 0 else None,
+            max_length=max_len,
             eos_token_id=eos_token_id,
             forced_bos_token_id=forced_bos_token_id,
             forced_eos_token_id=forced_eos_token_id,
@@ -832,7 +916,6 @@ class GenerationMixin(object):
             and isinstance(model_kwargs["logits_processors"], LogitsProcessorList)
             else None,
         )
-
         if "logits_processors" in model_kwargs:
             model_kwargs.pop("logits_processors")
 
@@ -842,9 +925,8 @@ class GenerationMixin(object):
                     "`num_return_sequences` has to be 1, but is {} "
                     "when doing greedy search.".format(num_return_sequences)
                 )
-
             return self.greedy_search(
-                input_ids, logits_processors, max_length, pad_token_id, eos_token_id, **model_kwargs
+                input_ids, logits_processors, max_len, pad_token_id, eos_token_id, **model_kwargs
             )
 
         elif decode_strategy == "sampling":
@@ -853,17 +935,30 @@ class GenerationMixin(object):
                     input_ids, expand_size=num_return_sequences, **model_kwargs
                 )
 
-            return self.sample(
-                input_ids,
-                logits_processors,
-                max_length,
-                pad_token_id,
-                eos_token_id,
-                top_k,
-                top_p,
-                temperature,
-                **model_kwargs,
-            )
+            if is_tracing:
+                return self.sample_d2s(
+                    input_ids,
+                    logits_processors,
+                    max_len,
+                    pad_token_id,
+                    eos_token_id,
+                    top_k,
+                    top_p,
+                    temperature,
+                    **model_kwargs,
+                )
+            else:
+                return self.sample(
+                    input_ids,
+                    logits_processors,
+                    max_len,
+                    pad_token_id,
+                    eos_token_id,
+                    top_k,
+                    top_p,
+                    temperature,
+                    **model_kwargs,
+                )
 
         elif decode_strategy == "beam_search":
             batch_size = input_ids.shape[0]
@@ -882,7 +977,7 @@ class GenerationMixin(object):
             if num_beam_groups > 1:
                 diverse_beam_scorer = BeamSearchScorer(
                     batch_size=batch_size,
-                    max_length=max_length,
+                    max_length=max_len,
                     num_beams=num_beams,
                     length_penalty=length_penalty,
                     do_early_stopping=early_stopping,
@@ -899,7 +994,7 @@ class GenerationMixin(object):
                     input_ids,
                     diverse_beam_scorer,
                     logits_processors,
-                    max_length,
+                    max_len,
                     pad_token_id,
                     eos_token_id,
                     **model_kwargs,
@@ -907,7 +1002,7 @@ class GenerationMixin(object):
             else:
                 beam_scorer = BeamSearchScorer(
                     batch_size=batch_size,
-                    max_length=max_length,
+                    max_length=max_len,
                     num_beams=num_beams,
                     length_penalty=length_penalty,
                     do_early_stopping=early_stopping,
@@ -922,7 +1017,7 @@ class GenerationMixin(object):
                     input_ids,
                     beam_scorer,
                     logits_processors,
-                    max_length,
+                    max_len,
                     diversity_rate,
                     pad_token_id,
                     eos_token_id,
@@ -930,25 +1025,34 @@ class GenerationMixin(object):
                 )
 
     def greedy_search(self, input_ids, logits_processors, max_length, pad_token_id, eos_token_id, **model_kwargs):
+        model_kwargs["use_cache"] = model_kwargs.get("use_cache", True)
         logits_processors = logits_processors if logits_processors is not None else LogitsProcessorList()
-
         batch_size, cur_len = input_ids.shape
         origin_len = cur_len
         unfinished_flag = paddle.full([batch_size, 1], True, dtype="bool")
         scores = paddle.full([batch_size, 1], 0.0, dtype=paddle.get_default_dtype())
-
         while cur_len < max_length:
+
             # prepare model inputs & get model output
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+
             outputs = self(**model_inputs)
-            logits = outputs[0] if isinstance(outputs, tuple) else outputs
+
+            if isinstance(outputs, tuple):
+                logits = outputs[0]
+            elif isinstance(outputs, ModelOutput):
+                logits = outputs.logits
+            else:
+                logits = outputs
+
             # [batch_size, vocab_size]
-            logits = logits[:, -1, :]
+            next_token_logits = logits[:, -1, :]
+
             # pre-process distribution
-            logits = self.adjust_logits_during_generation(logits)
-            logits = logits_processors(input_ids, logits)
+            next_token_logits = self.adjust_logits_during_generation(next_token_logits)
+            next_tokens_scores = logits_processors(input_ids, next_token_logits)
             # greedy
-            probs = F.softmax(logits)
+            probs = F.softmax(next_tokens_scores)
             probs = paddle.log(probs)
             next_tokens = paddle.argmax(probs, axis=-1).unsqueeze(-1)
             next_scores = paddle.index_sample(probs.astype("float32"), next_tokens)
@@ -959,10 +1063,11 @@ class GenerationMixin(object):
             scores = self.update_scores_for_generation(scores, next_scores, cur_len - origin_len, unfinished_flag)
 
             cur_len += 1
+
             input_ids = paddle.concat([input_ids, next_tokens], axis=1)
 
             if eos_token_id is not None:
-                unfinished_flag = paddle.logical_and(unfinished_flag, next_tokens != eos_token_id)
+                unfinished_flag = get_unfinished_flag(input_ids, unfinished_flag, eos_token_id)
 
             # Stop when there is a </s> in all sentences
             if not paddle.any(unfinished_flag):
@@ -971,6 +1076,7 @@ class GenerationMixin(object):
             model_kwargs = self.update_model_kwargs_for_generation(
                 outputs, model_kwargs, is_encoder_decoder=self.is_encoder_decoder
             )
+
         return input_ids[:, origin_len:], scores
 
     def sample(
@@ -986,6 +1092,7 @@ class GenerationMixin(object):
         min_tokens_to_keep=1,
         **model_kwargs
     ):
+        model_kwargs["use_cache"] = model_kwargs.get("use_cache", True)
 
         logits_processors = logits_processors if logits_processors is not None else LogitsProcessorList()
 
@@ -998,7 +1105,14 @@ class GenerationMixin(object):
             # prepare model inputs & get model output
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
             outputs = self(**model_inputs)
-            logits = outputs[0] if isinstance(outputs, tuple) else outputs
+
+            if isinstance(outputs, tuple):
+                logits = outputs[0]
+            elif isinstance(outputs, ModelOutput):
+                logits = outputs.logits
+            else:
+                logits = outputs
+
             # [batch_size, vocab_size]
             logits = logits[:, -1, :]
 
@@ -1016,7 +1130,13 @@ class GenerationMixin(object):
                 probs = TopKProcess(probs, top_k, min_tokens_to_keep)
             if top_p is not None and top_p < 1.0:
                 probs = TopPProcess(probs, top_p, min_tokens_to_keep)
-            next_tokens = paddle.multinomial(probs)
+
+            # multinomial not support fp16 and bf16 currently, issue: https://github.com/PaddlePaddle/Paddle/issues/51852
+            if probs.dtype == paddle.bfloat16 and top_k == 1:
+                probs = probs.astype("float32")
+                next_tokens = paddle.unsqueeze(paddle.argmax(probs, axis=-1), -1)
+            else:
+                next_tokens = paddle.multinomial(probs)
 
             next_scores = paddle.index_sample(origin_probs, next_tokens)
 
@@ -1039,6 +1159,127 @@ class GenerationMixin(object):
             )
         return input_ids[:, origin_len:], scores
 
+    def sample_d2s(
+        self,
+        input_ids,
+        logits_processors,
+        max_length,
+        pad_token_id,
+        eos_token_id,
+        top_k=None,
+        top_p=None,
+        temperature=None,
+        min_tokens_to_keep=1,
+        **model_kwargs
+    ):
+
+        logits_processors = logits_processors if logits_processors is not None else LogitsProcessorList()
+
+        batch_size, cur_len = paddle.shape(input_ids)
+        # used for compute on gpu, avoid memcpy D2H
+        cur_len_gpu = paddle.full([1], cur_len, dtype="int64")
+
+        origin_len = paddle.shape(input_ids)[1]
+        # used for compute on gpu, avoid memcpy D2H
+        origin_len_gpu = paddle.full([1], origin_len, dtype="int64")
+
+        unfinished_flag = paddle.full([batch_size, 1], True, dtype="bool")
+        scores = paddle.full([batch_size, 1], 0.0, dtype=paddle.get_default_dtype())
+
+        # use_cache is immutable, we split it off other mutable kwargs.
+        assert "use_cache" in model_kwargs
+        immutable = {"use_cache": model_kwargs["use_cache"]}
+        del model_kwargs["use_cache"]
+
+        def _forward_(**args):
+            model_inputs = self.prepare_inputs_for_generation(input_ids, **args, **immutable)
+            assert "use_cache" in model_inputs
+            del model_inputs["use_cache"]
+            return self(**model_inputs, **immutable)
+
+        def _post_process_(outputs, input_ids, cur_len, origin_len, scores, unfinished_flag, model_kwargs):
+            if isinstance(outputs, tuple):
+                logits = outputs[0]
+            elif isinstance(outputs, ModelOutput):
+                logits = outputs.logits
+            else:
+                logits = outputs
+
+            # [batch_size, vocab_size]
+            logits = logits[:, -1, :]
+
+            # pre-process distribution
+            logits = self.adjust_logits_during_generation(logits)
+
+            logits = logits_processors(input_ids, logits)
+
+            # sample
+            origin_probs = F.softmax(logits)
+            origin_probs = paddle.log(origin_probs)
+
+            if temperature is not None or temperature != 1.0:
+                logits = logits / temperature
+
+            probs = F.softmax(logits)
+            if top_k is not None and top_k != 0:
+                probs = TopKProcess(probs, top_k, min_tokens_to_keep)
+            if top_p is not None and top_p < 1.0:
+                probs = TopPProcess(probs, top_p, min_tokens_to_keep)
+
+            # multinomial not support fp16 and bf16 currently, issue: https://github.com/PaddlePaddle/Paddle/issues/51852
+            if paddle.get_default_dtype() not in ["float32", "float64"]:
+                probs = probs.astype("float32")
+            next_tokens = paddle.multinomial(probs)
+
+            next_scores = paddle.index_sample(origin_probs, next_tokens)
+
+            if eos_token_id is not None:
+                next_tokens = paddle.where(unfinished_flag, next_tokens, paddle.full_like(next_tokens, pad_token_id))
+
+            scores = self.update_scores_for_generation(scores, next_scores, cur_len - origin_len, unfinished_flag)
+
+            input_ids = paddle.concat([input_ids, next_tokens], axis=1)
+
+            if eos_token_id is not None:
+                unfinished_flag = paddle.logical_and(unfinished_flag, next_tokens != eos_token_id)
+
+            model_kwargs = self.update_model_kwargs_for_generation(
+                outputs, model_kwargs, is_encoder_decoder=self.is_encoder_decoder
+            )
+            return input_ids, scores, unfinished_flag, model_kwargs
+
+        outputs = _forward_(**model_kwargs)
+        input_ids, scores, unfinished_flag, model_kwargs = _post_process_(
+            outputs, input_ids, cur_len_gpu, origin_len_gpu, scores, unfinished_flag, model_kwargs
+        )
+
+        paddle.increment(cur_len)
+        paddle.increment(cur_len_gpu)
+
+        attn_mask = model_kwargs["attention_mask"]
+        # make the shape of attention_mask = (-1, -1, -1, -1) in dy2static.
+        model_kwargs["attention_mask"] = paddle.reshape(attn_mask, paddle.shape(attn_mask))
+        model_kwargs["cache"] = outputs[1] if isinstance(outputs, tuple) else None
+        max_length = paddle.full([1], max_length, dtype="int64")
+
+        while cur_len < max_length:
+            input_ids, scores, unfinished_flag, model_kwargs = _post_process_(
+                _forward_(**model_kwargs),
+                input_ids,
+                cur_len_gpu,
+                origin_len_gpu,
+                scores,
+                unfinished_flag,
+                model_kwargs,
+            )
+            paddle.increment(cur_len)
+            paddle.increment(cur_len_gpu)
+
+            if not paddle.any(unfinished_flag):
+                break
+
+        return input_ids[:, origin_len:], scores
+
     def beam_search(
         self,
         input_ids,
@@ -1050,6 +1291,8 @@ class GenerationMixin(object):
         eos_token_id,
         **model_kwargs
     ):
+        model_kwargs["use_cache"] = model_kwargs.get("use_cache", True)
+
         logits_processors = logits_processors if logits_processors is not None else LogitsProcessorList()
 
         batch_size = len(beam_scorer._beam_hyps)
@@ -1072,7 +1315,14 @@ class GenerationMixin(object):
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
             outputs = self(**model_inputs)
-            logits = outputs[0] if isinstance(outputs, tuple) else outputs
+
+            if isinstance(outputs, tuple):
+                logits = outputs[0]
+            elif isinstance(outputs, ModelOutput):
+                logits = outputs.logits
+            else:
+                logits = outputs
+
             # [batch_size, vocab_size]
             logits = logits[:, -1, :]
 
@@ -1098,7 +1348,7 @@ class GenerationMixin(object):
             else:
                 next_scores, next_tokens = paddle.topk(next_scores, 2 * num_beams, axis=1)
 
-                sibling_score = paddle.arange(1, 2 * num_beams + 1).unsqueeze(0) * diversity_rate
+                sibling_score = paddle.arange(1, 2 * num_beams + 1, dtype="int64").unsqueeze(0) * diversity_rate
 
                 diversed_score = next_scores - sibling_score
 
@@ -1143,7 +1393,7 @@ class GenerationMixin(object):
             model_kwargs = self.update_model_kwargs_for_generation(
                 outputs, model_kwargs, is_encoder_decoder=self.is_encoder_decoder
             )
-            if model_kwargs["cache"] is not None:
+            if "cache" in model_kwargs and model_kwargs["cache"] is not None:
                 # reorder the cache
                 model_kwargs["cache"] = map_structure(
                     lambda x: paddle.index_select(x, beam_idx), model_kwargs["cache"]
@@ -1209,8 +1459,13 @@ class GenerationMixin(object):
                     )
 
                 group_input_ids = input_ids[batch_group_indices]
-                logits = outputs[0] if isinstance(outputs, tuple) else outputs
-                # select outputs of beams of current group only
+
+                if isinstance(outputs, tuple):
+                    logits = outputs[0]
+                elif isinstance(outputs, ModelOutput):
+                    logits = outputs.logits
+                else:
+                    logits = outputs
 
                 logits = logits[:, -1, :]
                 logits = paddle.index_select(logits, paddle.to_tensor(batch_group_indices))
@@ -1266,7 +1521,7 @@ class GenerationMixin(object):
             model_kwargs = self.update_model_kwargs_for_generation(
                 outputs, model_kwargs, is_encoder_decoder=self.is_encoder_decoder
             )
-            if model_kwargs["cache"] is not None:
+            if "cache" in model_kwargs and model_kwargs["cache"] is not None:
                 # reorder the cache
                 model_kwargs["cache"] = map_structure(
                     lambda x: paddle.index_select(x, reordering_indices), model_kwargs["cache"]
@@ -1355,7 +1610,7 @@ class RepetitionPenaltyLogitsProcessor(LogitsProcessor):
     def __call__(self, input_ids, logits):
         score = paddle.index_sample(logits, input_ids)
         score = paddle.where(score < 0, score * self.penalty, score / self.penalty)
-        input_ids = input_ids + paddle.arange(logits.shape[0]).unsqueeze(-1) * logits.shape[-1]
+        input_ids = input_ids + paddle.arange(logits.shape[0], dtype="int64").unsqueeze(-1) * logits.shape[-1]
         outputs = paddle.scatter(logits.flatten(), input_ids.flatten(), score.flatten()).reshape(logits.shape)
         return outputs
 
@@ -1470,7 +1725,7 @@ class ForcedBOSTokenLogitsProcessor(LogitsProcessor):
 
     Args:
         forced_bos_token_id (:obj:`int`):
-            The id of the token to to be generated as the first token.
+            The id of the token to be generated as the first token.
     """
 
     def __init__(self, forced_bos_token_id):
@@ -1491,7 +1746,7 @@ class ForcedEOSTokenLogitsProcessor(LogitsProcessor):
 
     Args:
         max_length (int): The maximum length of the sequence to be generated.
-        forced_eos_token_id (int): The id of the token to to be generated as the last token.
+        forced_eos_token_id (int): The id of the token to be generated as the last token.
     """
 
     def __init__(self, max_length, forced_eos_token_id):
@@ -1512,7 +1767,14 @@ class ForcedEOSTokenLogitsProcessor(LogitsProcessor):
 def TopKProcess(probs, top_k, min_tokens_to_keep):
     top_k = min(max(top_k, min_tokens_to_keep), probs.shape[-1])
     # Remove all tokens with a probability less than the last token of the top-k
-    topk_probs, _ = paddle.topk(probs, k=top_k)
+    # cast to float16 to support generation & d2s
+    if probs.dtype == paddle.bfloat16:
+        probs = paddle.cast(probs, paddle.float32)
+        topk_probs, _ = paddle.topk(probs, k=top_k)
+        topk_probs = paddle.cast(topk_probs, paddle.bfloat16)
+    else:
+        topk_probs, _ = paddle.topk(probs, k=top_k)
+
     probs = paddle.where(probs >= topk_probs[:, -1:], probs, paddle.full_like(probs, 0.0))
     return probs
 
@@ -1534,7 +1796,7 @@ def TopPProcess(probs, top_p, min_tokens_to_keep):
     sorted_indices_to_remove[:, 0] = 0
 
     # Scatter sorted tensors to original indexing
-    sorted_indices = sorted_indices + paddle.arange(probs.shape[0]).unsqueeze(-1) * probs.shape[-1]
+    sorted_indices = sorted_indices + paddle.arange(probs.shape[0], dtype="int64").unsqueeze(-1) * probs.shape[-1]
     condition = paddle.scatter(
         sorted_indices_to_remove.flatten(), sorted_indices.flatten(), sorted_indices_to_remove.flatten()
     )

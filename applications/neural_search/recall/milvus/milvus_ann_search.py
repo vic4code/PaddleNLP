@@ -12,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import random
-from tqdm import tqdm
-import time
 import argparse
+import time
 
 import numpy as np
-from milvus_util import VecToMilvus, RecallByMilvus, text_max_len
-from config import collection_name, partition_tag, embedding_name
+from config import collection_name, embedding_name, partition_tag
+from milvus_util import RecallByMilvus, VecToMilvus, text_max_len
+from tqdm import tqdm
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -70,7 +69,7 @@ def milvus_data_recall(embedding_path, index):
     embedding_ids = [i for i in range(embeddings.shape[0])]
     recall_client = RecallByMilvus()
     if index > len(embedding_ids):
-        print("Index should not be larger than embedding szie")
+        print("Index should not be larger than embedding size")
         return
     embeddings = embeddings[np.arange(index, index + 1)]
     time_start = time.time()

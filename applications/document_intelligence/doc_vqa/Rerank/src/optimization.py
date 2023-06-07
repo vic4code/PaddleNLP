@@ -13,16 +13,8 @@
 # limitations under the License.
 """Optimization and learning rate scheduling."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
-from __future__ import absolute_import
-
-import numpy as np
-
 import paddle.fluid as fluid
-from paddle.fluid.incubate.fleet.collective import fleet, DistributedStrategy
+from paddle.fluid.incubate.fleet.collective import fleet
 
 
 def linear_warmup_decay(learning_rate, warmup_steps, num_train_steps):
@@ -76,7 +68,7 @@ def optimization(
         elif scheduler == "linear_warmup_decay":
             scheduled_lr = linear_warmup_decay(learning_rate, warmup_steps, num_train_steps)
         else:
-            raise ValueError("Unkown learning rate scheduler, should be " "'noam_decay' or 'linear_warmup_decay'")
+            raise ValueError("Unknown learning rate scheduler, should be " "'noam_decay' or 'linear_warmup_decay'")
         if use_lamb:
             optimizer = fluid.optimizer.LambOptimizer(learning_rate=scheduled_lr)
         else:

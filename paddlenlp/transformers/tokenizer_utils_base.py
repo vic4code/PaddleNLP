@@ -45,7 +45,7 @@ from paddlenlp.utils.downloader import (
     get_path_from_url_with_filelock,
     url_file_exists,
 )
-from paddlenlp.utils.env import MODEL_HOME
+from paddlenlp.utils.env import TOKENIZER_CONFIG_NAME
 from paddlenlp.utils.log import logger
 
 from .utils import resolve_cache_dir
@@ -1292,7 +1292,7 @@ class PretrainedTokenizerBase(SpecialTokensMixin):
     pretrained_init_configuration: Dict[str, Dict[str, Any]] = {}
     max_model_input_sizes: Dict[str, Optional[int]] = {}
     _auto_class: Optional[str] = None
-    tokenizer_config_file = "tokenizer_config.json"
+    tokenizer_config_file = TOKENIZER_CONFIG_NAME
 
     # first name has to correspond to main model input name
     # to make sure `tokenizer.pad(...)` works correctly
@@ -1362,6 +1362,12 @@ class PretrainedTokenizerBase(SpecialTokensMixin):
             raise ValueError(
                 "Setting 'max_len_single_sentence' is now deprecated. " "This value is automatically set up."
             )
+
+    def _switch_to_input_mode(self):
+        """
+        Private method to put the tokenizer in input mode (when it has different modes for input/outputs)
+        """
+        pass
 
     @max_len_sentences_pair.setter
     def max_len_sentences_pair(self, value) -> int:
@@ -1483,11 +1489,6 @@ class PretrainedTokenizerBase(SpecialTokensMixin):
                 [COMMUNITY_MODEL_PREFIX, pretrained_model_name_or_path, cls.tokenizer_config_file]
             )
 
-        default_root = (
-            os.path.join(cache_dir, pretrained_model_name_or_path)
-            if cache_dir is not None
-            else os.path.join(MODEL_HOME, pretrained_model_name_or_path)
-        )
         resolved_vocab_files = {}
         for file_id, file_path in vocab_files.items():
             if file_path is None or os.path.isfile(file_path):
@@ -1503,19 +1504,19 @@ class PretrainedTokenizerBase(SpecialTokensMixin):
                     library_version=__version__,
                 )
             else:
-                path = os.path.join(default_root, file_path.split("/")[-1])
+                path = os.path.join(cache_dir, file_path.split("/")[-1])
                 if os.path.exists(path):
                     logger.info("Already cached %s" % path)
                     resolved_vocab_files[file_id] = path
 
                 else:
-                    logger.info("Downloading %s and saved to %s" % (file_path, default_root))
+                    logger.info("Downloading %s and saved to %s" % (file_path, cache_dir))
                     try:
                         if not url_file_exists(file_path):
                             logger.warning(f"file<{file_path}> not exist")
                             resolved_vocab_files[file_id] = None
                             continue
-                        resolved_vocab_files[file_id] = get_path_from_url_with_filelock(file_path, default_root)
+                        resolved_vocab_files[file_id] = get_path_from_url_with_filelock(file_path, cache_dir)
                     except RuntimeError as err:
                         if file_id not in cls.resource_files_names:
                             resolved_vocab_files[file_id] = None
@@ -1638,7 +1639,7 @@ class PretrainedTokenizerBase(SpecialTokensMixin):
             )
         # save all of related things into default root dir
         if pretrained_model_name_or_path in cls.pretrained_init_configuration:
-            tokenizer.save_pretrained(default_root)
+            tokenizer.save_pretrained(cache_dir)
 
         return tokenizer
 
@@ -1920,7 +1921,7 @@ class PretrainedTokenizerBase(SpecialTokensMixin):
                     FutureWarning,
                 )
             truncation_strategy = TruncationStrategy(old_truncation_strategy)
-        elif truncation is not False:
+        elif truncation is not False and truncation is not None:
             if truncation is True:
                 truncation_strategy = (
                     TruncationStrategy.LONGEST_FIRST
@@ -2317,6 +2318,78 @@ class PretrainedTokenizerBase(SpecialTokensMixin):
             pad_to_multiple_of=pad_to_multiple_of,
             return_tensors=return_tensors,
             return_position_ids=return_position_ids,
+            return_token_type_ids=return_token_type_ids,
+            return_attention_mask=return_attention_mask,
+            return_overflowing_tokens=return_overflowing_tokens,
+            return_special_tokens_mask=return_special_tokens_mask,
+            return_offsets_mapping=return_offsets_mapping,
+            return_length=return_length,
+            verbose=verbose,
+            **kwargs,
+        )
+
+    def encode_plus(
+        self,
+        text: Union[TextInput, PreTokenizedInput, EncodedInput],
+        text_pair: Optional[Union[TextInput, PreTokenizedInput, EncodedInput]] = None,
+        add_special_tokens: bool = True,
+        padding: Union[bool, str, PaddingStrategy] = False,
+        truncation: Union[bool, str, TruncationStrategy] = None,
+        max_length: Optional[int] = None,
+        stride: int = 0,
+        is_split_into_words: bool = False,
+        pad_to_multiple_of: Optional[int] = None,
+        return_tensors: Optional[Union[str, TensorType]] = None,
+        return_token_type_ids: Optional[bool] = None,
+        return_attention_mask: Optional[bool] = None,
+        return_overflowing_tokens: bool = False,
+        return_special_tokens_mask: bool = False,
+        return_offsets_mapping: bool = False,
+        return_length: bool = False,
+        verbose: bool = True,
+        **kwargs,
+    ) -> BatchEncoding:
+        """
+        Tokenize and prepare for the model a sequence or a pair of sequences.
+
+        <Tip warning={true}>
+
+        This method is deprecated, `__call__` should be used instead.
+
+        </Tip>
+
+        Args:
+            text (`str`, `List[str]` or `List[int]` (the latter only for not-fast tokenizers)):
+                The first sequence to be encoded. This can be a string, a list of strings (tokenized string using the
+                `tokenize` method) or a list of integers (tokenized string ids using the `convert_tokens_to_ids`
+                method).
+            text_pair (`str`, `List[str]` or `List[int]`, *optional*):
+                Optional second sequence to be encoded. This can be a string, a list of strings (tokenized string using
+                the `tokenize` method) or a list of integers (tokenized string ids using the `convert_tokens_to_ids`
+                method).
+        """
+
+        # Backward compatibility for 'truncation_strategy', 'pad_to_max_length'
+        padding_strategy, truncation_strategy, max_length, kwargs = self._get_padding_truncation_strategies(
+            padding=padding,
+            truncation=truncation,
+            max_length=max_length,
+            pad_to_multiple_of=pad_to_multiple_of,
+            verbose=verbose,
+            **kwargs,
+        )
+
+        return self._encode_plus(
+            text=text,
+            text_pair=text_pair,
+            add_special_tokens=add_special_tokens,
+            padding_strategy=padding_strategy,
+            truncation_strategy=truncation_strategy,
+            max_length=max_length,
+            stride=stride,
+            is_split_into_words=is_split_into_words,
+            pad_to_multiple_of=pad_to_multiple_of,
+            return_tensors=return_tensors,
             return_token_type_ids=return_token_type_ids,
             return_attention_mask=return_attention_mask,
             return_overflowing_tokens=return_overflowing_tokens,
@@ -3020,9 +3093,10 @@ class PretrainedTokenizerBase(SpecialTokensMixin):
                     encoded_inputs["offset_mapping"] = encoded_inputs["offset_mapping"] + [(0, 0)] * difference
                 if "position_ids" in encoded_inputs:
                     encoded_inputs["position_ids"] = encoded_inputs["position_ids"] + [0] * difference
-                if "start_positions" in encoded_inputs:
+                # NOTE: In ernie3.0-qa, the type of `*_positions` is int.
+                if "start_positions" in encoded_inputs and isinstance(encoded_inputs["start_positions"], list):
                     encoded_inputs["start_positions"] = encoded_inputs["start_positions"] + [0] * difference
-                if "end_positions" in encoded_inputs:
+                if "end_positions" in encoded_inputs and isinstance(encoded_inputs["end_positions"], list):
                     encoded_inputs["end_positions"] = encoded_inputs["end_positions"] + [0] * difference
                 encoded_inputs[self.model_input_names[0]] = required_input + [self.pad_token_id] * difference
             elif self.padding_side == "left":
@@ -3038,9 +3112,9 @@ class PretrainedTokenizerBase(SpecialTokensMixin):
                     encoded_inputs["offset_mapping"] = [(0, 0)] * difference + encoded_inputs["offset_mapping"]
                 if "position_ids" in encoded_inputs:
                     encoded_inputs["position_ids"] = [0] * difference + encoded_inputs["position_ids"]
-                if "start_positions" in encoded_inputs:
+                if "start_positions" in encoded_inputs and isinstance(encoded_inputs["start_positions"], list):
                     encoded_inputs["start_positions"] = [0] * difference + encoded_inputs["start_positions"]
-                if "end_positions" in encoded_inputs:
+                if "end_positions" in encoded_inputs and isinstance(encoded_inputs["end_positions"], list):
                     encoded_inputs["end_positions"] = [0] * difference + encoded_inputs["end_positions"]
                 encoded_inputs[self.model_input_names[0]] = [self.pad_token_id] * difference + required_input
             else:
