@@ -23,6 +23,7 @@ pip install git+https://github.com/PaddlePaddle/PaddleNLP.git
 ```
 git clone https://github.com/PaddlePaddle/PaddleNLP.git
 export PYTHONPATH=/path/to/your/module/directory
+export PYTHONPATH=/home/ubuntu/projects/PaddleNLP
 pip install paddlepaddle
 pip install -r requirements.txt     
 ```
@@ -64,7 +65,7 @@ python train.py \
 --output_dir ./checkpoints/ \
 --prompt "這句話要包含的要素有" \
 --model_name_or_path ernie-3.0-base-zh \
---max_seq_length 128  \
+--max_seq_length 2048  \
 --learning_rate 3e-5 \
 --ppt_learning_rate 3e-4 \
 --do_train \
@@ -74,8 +75,8 @@ python train.py \
 --num_train_epochs 100 \
 --logging_steps 5 \
 --save_total_limit 1 \
---per_device_eval_batch_size 32 \
---per_device_train_batch_size 8 \
+--per_device_eval_batch_size 1 \
+--per_device_train_batch_size 1 \
 --metric_for_best_model micro_f1_score \
 --load_best_model_at_end \
 --evaluation_strategy epoch \
@@ -83,6 +84,7 @@ python train.py \
 ```
 
 ### cpu version
+--dataloader_drop_last = True to frop the uncomplete batch, but it's not valid when testing.
 ```
 python train.py \
 --device "cpu" \
@@ -90,7 +92,7 @@ python train.py \
 --output_dir ./checkpoints/ \
 --prompt "這句話要包含的要素有" \
 --model_name_or_path ernie-3.0-base-zh \
---max_seq_length 128  \
+--max_seq_length 256  \
 --learning_rate 3e-5 \
 --ppt_learning_rate 3e-4 \
 --do_train \
@@ -100,12 +102,13 @@ python train.py \
 --num_train_epochs 100 \
 --logging_steps 5 \
 --save_total_limit 1 \
---per_device_eval_batch_size 32 \
+--per_device_eval_batch_size 8 \
 --per_device_train_batch_size 8 \
 --metric_for_best_model micro_f1_score \
 --load_best_model_at_end \
 --evaluation_strategy epoch \
---save_strategy epoch
+--save_strategy epoch \
+--dataloader_drop_last True
 ```
 
 ### Custom model (XLNet)
@@ -116,7 +119,7 @@ python train.py \
 --output_dir ./checkpoints/ \
 --prompt "這句話要包含的要素有" \
 --model_name_or_path chinese-xlnet-base \
---max_seq_length 20000 \
+--max_seq_length 2048 \
 --mem_len 512 \
 --reuse_len 512 \
 --learning_rate 3e-5 \
@@ -139,4 +142,9 @@ python train.py \
 ### XLNet gpu
 ``` 
 python -u -m paddle.distributed.launch --gpus 0,1 train.py --data_dir ./data/dataset --output_dir ./checkpoints/ --prompt "這句話要包含的要素有" --model_name_or_path chinese-xlnet-base --max_seq_length 2048 --learning_rate 3e-5 --ppt_learning_rate 3e-4 --do_train --do_eval --do_predict --do_export --num_train_epochs 100 --logging_steps 5 --save_total_limit 1 --per_device_eval_batch_size 1 --per_device_train_batch_size 1 --metric_for_best_model micro_f1_score --load_best_model_at_end --evaluation_strategy epoch --save_strategy epoch
+```
+
+### Ernie on instance
+```
+python train.py --data_dir ./data/dataset --output_dir ./checkpoints/ --prompt "這句話要包含的要素有" --model_name_or_path ernie-3.0-base-zh --max_seq_length 64 --learning_rate 3e-5 --ppt_learning_rate 3e-4 --do_train --do_eval --do_predict --do_export --num_train_epochs 10 --logging_steps 5 --save_total_limit 1 --per_device_eval_batch_size 1 --per_device_train_batch_size 2 --metric_for_best_model micro_f1_score --load_best_model_at_end --evaluation_strategy epoch --save_strategy epoch  --dataloader_drop_last True
 ```
