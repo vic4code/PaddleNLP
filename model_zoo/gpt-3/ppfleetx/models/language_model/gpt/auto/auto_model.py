@@ -93,7 +93,7 @@ class MultiHeadAttention(nn.Layer):
         self.ipp = ipp
 
         self.head_dim = embed_dim // num_heads
-        assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
+        assert self.head_dim * num_heads == self.embed_dim, "embed_dim[{}] must be divisible by num_heads[{}]".format(self.embed_dim, num_heads)
 
         if self.fuse_attn_qkv:
             assert self.kdim == embed_dim
@@ -290,7 +290,8 @@ class TransformerDecoder(nn.Layer):
         new_caches = []
 
         for i, mod in enumerate(self.layers):
-            mod = auto.shard_op(mod, auto_env.get_mesh()[mod.ipp])
+            ipp = mod.ipp
+            mod = auto.shard_op(mod, auto_env.get_mesh()[ipp])
 
             if cache is None:
                 if use_cache:
@@ -304,6 +305,8 @@ class TransformerDecoder(nn.Layer):
             else:
                 output, new_cache = mod(output, memory, tgt_mask=tgt_mask, use_cache=use_cache, cache=cache[i])
                 new_caches.append(new_cache)
+
+            auto.shard_tensor(output, auto_env.get_mesh()[ipp], [auto_env.get_mesh().dp_dim, None, None])
 
         if self.norm is not None:
             output = self.norm(output)
@@ -757,7 +760,7 @@ class GPTForGenerationAuto(nn.Layer):
     def prepare_attention_mask_for_generation(self, input_ids, pad_token_id, eos_token_id):
         is_pad_token_in_inputs_ids = (pad_token_id is not None) and paddle.any(
             input_ids == pad_token_id
-        ).numpy().item()
+        ).item()
         is_pad_token_not_equal_to_eos_token_id = (eos_token_id is None) or (
             (eos_token_id is not None) and (pad_token_id != eos_token_id)
         )
@@ -1145,10 +1148,20 @@ class GPTForGenerationAuto(nn.Layer):
 
         if self.inference:
             # Note(ZhenyuLi): Avoid the synchronization caused by scale in dy2static
-            min_len = input_ids.shape[-1]
-            max_len = input_ids.shape[-1]
-            paddle.increment(min_len, min_length)
-            paddle.increment(max_len, max_length)
+            if hasattr(paddle.framework, "_no_check_dy2st_diff"):
+                # TODO(wanghuancoder): _no_check_dy2st_diff is used to turn off the checking of behavior
+                # inconsistency between dynamic graph and static graph. _no_check_dy2st_diff should be
+                # removed after static graphs support inplace and stride.
+                with paddle.framework._no_check_dy2st_diff():
+                    min_len = input_ids.shape[-1]
+                    max_len = input_ids.shape[-1]
+                    paddle.increment(min_len, min_length)
+                    paddle.increment(max_len, max_length)
+            else:
+                min_len = input_ids.shape[-1]
+                max_len = input_ids.shape[-1]
+                paddle.increment(min_len, min_length)
+                paddle.increment(max_len, max_length)
         else:
             input_len = input_ids.shape[-1]
             max_len = max_length + input_len
@@ -1171,18 +1184,34 @@ class GPTForGenerationAuto(nn.Layer):
                 input_ids, model_kwargs = self.expand_inputs_for_generation(
                     input_ids, expand_size=num_return_sequences, **model_kwargs
                 )
-
-            ret = self.sample(
-                input_ids,
-                logits_processors,
-                max_len,
-                pad_token_id,
-                eos_token_id,
-                top_k,
-                top_p,
-                temperature,
-                **model_kwargs,
-            )
+            if hasattr(paddle.framework, "_no_check_dy2st_diff"):
+                # TODO(wanghuancoder): _no_check_dy2st_diff is used to turn off the checking of behavior
+                # inconsistency between dynamic graph and static graph. _no_check_dy2st_diff should be
+                # removed after static graphs support inplace and stride.
+                with paddle.framework._no_check_dy2st_diff():
+                    ret = self.sample(
+                        input_ids,
+                        logits_processors,
+                        max_len,
+                        pad_token_id,
+                        eos_token_id,
+                        top_k,
+                        top_p,
+                        temperature,
+                        **model_kwargs,
+                    )
+            else:
+                ret = self.sample(
+                    input_ids,
+                    logits_processors,
+                    max_len,
+                    pad_token_id,
+                    eos_token_id,
+                    top_k,
+                    top_p,
+                    temperature,
+                    **model_kwargs,
+                )
         else:
             raise ValueError(f"Not support {decode_strategy} strategy yet!")
         return ret
